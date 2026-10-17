@@ -39,7 +39,7 @@ If a file with that name already exists:
 - **same content**: it is left alone;
 - **different**: you see both sizes and choose **keep both** (saved as `name (recovered)`), **replace** (the old one becomes `name (old)`, nothing is deleted) or **skip**.
 
-Before writing anything, the tool tests the key on a few of your files. If your files were encrypted with a different key, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe.
+Before writing anything, the tool tests the key on a few of your files. If your files were encrypted with a different key, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe. For scripts and many machines there is a [command line](#command-line) mode.
 
 ## After the recovery
 
@@ -81,7 +81,19 @@ Lessons: an "original" must be the exact same version, so compare the bytes afte
 - **After each file:** CRC32 of ZIP/Office/ODF entries inside the decrypted zone, PNG chunk CRCs, XML parsing, a `7z t` for RAR/7z when 7-Zip is installed (found via registry or PATH; optional), header checks for the rest.
 - Writes to a temporary file and renames it, so an interrupted run never leaves a half-written file under the real name. Memory use stays flat on large files.
 
-Command line: `JassDecryptor.exe /cli <folder or file> [/conflict:beside|replace|skip] [/force]`. Exit codes: 0 clean, 1 some files need a look, 2 the key does not fit, 3 the key cannot be loaded.
+### Command line
+
+The same exe runs without a window:
+
+```
+start /wait JassDecryptor.exe /cli D:\Data /conflict:skip
+```
+
+- `/conflict:beside` (default) saves a differing file as `name (recovered).ext`; `replace` renames the existing one to `name (old).ext` first; `skip` leaves it.
+- `/force` goes on even if the key check fails. `/?` prints the help.
+- One line per file, then a summary and the CSV report path. Output can be redirected to a file. Ctrl+C stops after the current file.
+- Exit codes: 0 clean, 1 some files need a look, 2 the key does not fit, 3 the key cannot be loaded, 4 bad arguments or no `.jass` files.
+- It is a GUI exe, so an interactive `cmd` does not wait for it: use `start /wait`. Batch files and PowerShell's `Start-Process -Wait` wait by themselves.
 
 ### Source
 

@@ -666,6 +666,7 @@ namespace JassDecryptor
                     string rd = Path.Combine(d, "JassDecryptor-reports");
                     Directory.CreateDirectory(rd);
                     string p = Path.Combine(rd, name);
+                    for (int i = 2; File.Exists(p); i++) p = Path.Combine(rd, Path.GetFileNameWithoutExtension(name) + "-" + i + ".csv");
                     using (var w = new StreamWriter(p, false, new UTF8Encoding(true)))
                     {
                         w.WriteLine("source;target;size;kind;action;verdict;note");
@@ -971,21 +972,46 @@ namespace JassDecryptor
     static class Program
     {
         [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+        [DllImport("kernel32.dll")] static extern bool AllocConsole();
+        [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
+        [DllImport("kernel32.dll")] static extern uint GetFileType(IntPtr h);
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+
+        const string Usage =
+            "Jass Decryptor, Copyright (c) 2026 Dimitar Grigorov\n" +
+            "Restores .jass files next to themselves; the .jass files are never changed.\n\n" +
+            "  JassDecryptor.exe /cli <folder or file> [/conflict:beside|replace|skip] [/force]\n\n" +
+            "  /conflict  when a different file with the target name exists:\n" +
+            "             beside  = save as \"name (recovered).ext\" (default)\n" +
+            "             replace = rename the existing one to \"name (old).ext\", then restore\n" +
+            "             skip    = leave it\n" +
+            "  /force     continue even if the key check fails\n\n" +
+            "Ctrl+C stops after the current file.\n" +
+            "Exit code: 0 clean, 1 some files need a look, 2 the key does not fit,\n" +
+            "           3 the key cannot be loaded, 4 bad arguments or nothing found.\n" +
+            "In cmd.exe use \"start /wait\" to wait for it; batch files wait on their own.";
 
         [STAThread]
         static int Main(string[] args)
         {
-            bool cli = args.Length >= 2 && args[0].Equals("/cli", StringComparison.OrdinalIgnoreCase);
-            if (cli) AttachConsole(-1);
+            bool cli = args.Length >= 1 && (args[0].Equals("/cli", StringComparison.OrdinalIgnoreCase) || args[0] == "/?" || args[0] == "-h" || args[0] == "--help");
+            // A GUI exe gets no console of its own: keep a redirected stdout (file or pipe), else borrow the
+            // caller's console, else open one (Run dialog, shortcut).
+            uint outType = GetFileType(GetStdHandle(-11));
+            bool redirected = outType == 1 || outType == 3;
+            bool ownConsole = cli && !redirected && !AttachConsole(-1) && AllocConsole();
+            if (cli)
+            {
+                int code = CliMain(args);
+                if (ownConsole) { Console.Write("\nPress Enter to close."); Console.ReadLine(); }
+                return code;
+            }
             string keyError = KeystreamError();
             if (keyError != null)
             {
-                if (cli) Console.WriteLine(keyError);
-                else MessageBox.Show(keyError, "Jass Decryptor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(keyError, "Jass Decryptor", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 3;
             }
-            if (cli) return Cli(args);
             if (Environment.OSVersion.Version.Major >= 6) SetProcessDPIAware();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -1002,38 +1028,65 @@ namespace JassDecryptor
             catch (TypeInitializationException ex) { return (ex.InnerException ?? ex).Message; }
         }
 
-        // JassDecryptor.exe /cli <file or folder> [/conflict:beside|replace|skip] [/force]
-        // Exit code: 0 clean, 1 some files need a look, 2 the key does not fit, 3 the key cannot be loaded.
-        static int Cli(string[] args)
+        static int CliMain(string[] args)
         {
+            // The caller's prompt is already printed; start on a fresh line.
+            Console.WriteLine();
+            bool help = !args[0].Equals("/cli", StringComparison.OrdinalIgnoreCase);
+            if (help || args.Length < 2) { Console.WriteLine(Usage); return help ? 0 : 4; }
             Conflict conflict = Conflict.Beside;
             bool force = false;
             for (int i = 2; i < args.Length; i++)
             {
-                if (args[i].StartsWith("/conflict:", StringComparison.OrdinalIgnoreCase))
-                    conflict = (Conflict)Enum.Parse(typeof(Conflict), args[i].Substring(10), true);
-                else if (args[i].Equals("/force", StringComparison.OrdinalIgnoreCase)) force = true;
+                string a = args[i].ToLowerInvariant();
+                if (a == "/conflict:beside") conflict = Conflict.Beside;
+                else if (a == "/conflict:replace") conflict = Conflict.Replace;
+                else if (a == "/conflict:skip") conflict = Conflict.Skip;
+                else if (a == "/force") force = true;
+                else { Console.WriteLine("Unknown option: " + args[i] + "\n\n" + Usage); return 4; }
             }
+            string keyError = KeystreamError();
+            if (keyError != null) { Console.WriteLine(keyError); return 3; }
+            return Cli(Path.GetFullPath(args[1].Trim('"')), conflict, force);
+        }
+
+        static int Cli(string root, Conflict conflict, bool force)
+        {
             var errors = new List<string>();
-            var files = Engine.Collect(args[1], errors);
+            var files = Engine.Collect(root, errors);
+            foreach (var e in errors) Console.WriteLine("cannot read " + e);
+            if (files.Count == 0) { Console.WriteLine("No .jass files in " + root); return 4; }
             int tested, passed;
             string bad = Engine.Preflight(files, out tested, out passed);
-            Console.WriteLine();
-            Console.WriteLine("files " + files.Count + ", key " + Keystream.Origin + ", key check " + passed + "/" + tested);
-            if (tested >= 3 && passed < tested * 0.8 && !force) { Console.WriteLine("key does not fit: " + bad); return 2; }
+            Console.WriteLine(files.Count + (files.Count == 1 ? " .jass file in " : " .jass files in ") + root + "; key: " + Keystream.Origin + "; key check: " + passed + " of " + tested);
+            if (tested >= 3 && passed < tested * 0.8 && !force)
+            {
+                Console.WriteLine("The key does not fit (e.g. " + bad + "). Nothing was written.");
+                return 2;
+            }
+
+            bool stop = false;
+            Console.CancelKeyPress += (s, e) => { e.Cancel = true; stop = true; Console.WriteLine("Stopping after the current file..."); };
             var rows = new List<Result>();
             int problems = 0;
             foreach (var f in files)
             {
-                var r = Engine.ProcessOne(f, delegate { return conflict; }, () => false);
+                if (stop) break;
+                var r = Engine.ProcessOne(f, delegate { return conflict; }, () => stop);
                 rows.Add(r);
                 if (r.IsProblem) problems++;
+                string rel = f.StartsWith(root, StringComparison.OrdinalIgnoreCase) && f.Length > root.Length ? f.Substring(root.Length).TrimStart('\\') : Path.GetFileName(f);
+                Console.WriteLine("{0,-14} {1,-10} {2}{3}", Engine.ActionText(r.Action), r.Verdict, rel, r.Note.Length > 0 ? "  (" + r.Note.TrimEnd(' ', ';') + ")" : "");
             }
-            var cnt = new SortedDictionary<string, int>();
-            foreach (var r in rows) { string k = r.Action + "/" + r.Verdict; cnt[k] = (cnt.ContainsKey(k) ? cnt[k] : 0) + 1; }
-            foreach (var kv in cnt) Console.WriteLine(kv.Key + " " + kv.Value);
-            Console.WriteLine("report " + Engine.WriteReport(rows));
-            return problems > 0 ? 1 : 0;
+
+            var cnt = new Dictionary<string, int>();
+            foreach (var r in rows) { string k = Engine.ActionText(r.Action); cnt[k] = (cnt.ContainsKey(k) ? cnt[k] : 0) + 1; }
+            Console.WriteLine();
+            foreach (var kv in cnt) Console.WriteLine(kv.Key + ": " + kv.Value);
+            Console.WriteLine("Need a look: " + problems + (stop ? " (stopped, " + (files.Count - rows.Count) + " not processed)" : ""));
+            string report = Engine.WriteReport(rows);
+            if (report != null) Console.WriteLine("Report: " + report);
+            return problems > 0 || stop ? 1 : 0;
         }
     }
 }

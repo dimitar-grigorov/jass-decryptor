@@ -50,4 +50,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME csharp/JassDecryptor.exe csharp/JassDecryptor.exe.sha256 --title $env:GITHUB_REF_NAME --generate-notes
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          $m = [regex]::Match((Get-Content CHANGELOG.md -Raw), "(?ms)^## $([regex]::Escape($v)) [^\n]*\n(.*?)(?=^## |\z)")
+          if (-not $m.Success) { throw "CHANGELOG.md has no entry for $v" }
+          $m.Groups[1].Value.Trim() | Out-File -Encoding utf8 notes.md
+          gh release create $env:GITHUB_REF_NAME csharp/JassDecryptor.exe csharp/JassDecryptor.exe.sha256 --title $env:GITHUB_REF_NAME --notes-file notes.md
