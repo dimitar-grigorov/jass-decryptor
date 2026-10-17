@@ -3,7 +3,7 @@ Usage: python jass_decryptor.py <file or folder> <output folder>
 Inputs are never modified. Writes <output>/jass-decryptor-report.csv with one verdict per file.
 
 Stream: jass_keystream_20000.bin next to this script if present, else ../keystream/. The shipped stream is proven exact
-for all 20000 positions for one victim: a full 11 MB ZIP decrypted with it passes its CRC32 and the database inside
+for all 20000 positions for one victim: a ZIP decrypted with it passes its CRC32 and the database inside
 restores with a clean DBCC CHECKDB. Files larger than 20000 bytes were only encrypted in the head; the rest is untouched.
 Verdicts: OK = format check passed, UNVERIFIED = decrypted but this format cannot be checked here, CHECK = a format
 check failed (the file may use another stream or was damaged): confirm these by hand. The C# tool (JassDecryptor.exe) is the

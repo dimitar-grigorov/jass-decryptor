@@ -27,12 +27,12 @@ If this matches, try the tool before you pay anything.
 
 ## The "very strong password" isn't
 
-Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: a SQL Server database, an 11 MB ZIP and a 43 MB RAR with 5688 files all pass their own checksums. A whole company's files, database included, were back the same day. Nobody paid.
+Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: SQL Server databases, archives, PDFs and spreadsheets all came back and pass their own checksums. A whole business was back the same day. Nobody paid.
 
 ## How to use it
 
-1. Download `JassDecryptor.exe` and run it. The interface is in Bulgarian.
-2. Choose a folder or a single file (or drop it onto the window) and press **Възстанови** (Restore).
+1. Download `JassDecryptor.exe` and run it.
+2. Choose a folder or a single file (or drop it onto the window) and press **Restore**.
 3. Every `name.jass` is restored next to itself as `name`. The `.jass` files are not changed.
 
 If a file with that name already exists:
@@ -55,7 +55,7 @@ You need one file that you have both as an exact original and encrypted: an inst
 python python/derive_keystream.py jass_keystream_20000.bin <original> <original>.jass
 ```
 
-Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; the window then shows that key instead of "вграден" (built-in). An older version of a file is not an original: wherever its content changed, the key comes out wrong.
+Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; the status line then shows its name instead of "built-in". An older version of a file is not an original: wherever its content changed, the key comes out wrong.
 
 Stuck? Open an issue, with one non-sensitive original/encrypted pair if you can share it.
 
@@ -65,13 +65,13 @@ Stuck? Open an issue, with one non-sensitive original/encrypted pair if you can 
 
 ### How we cracked it
 
-A small company woke up to `*.jass` files. The one thing that mattered was a SQL Server 2008 R2 database, and its only backup was an encrypted ZIP.
+A small business woke up to `*.jass` files. What mattered most was its SQL Server database, and the only backup was an encrypted ZIP.
 
 1. **The tail was intact.** The ZIP's central directory at the end of the file was readable, and the archive was exactly its original size. So only the head was encrypted and nothing was appended: no key, no file ID.
 2. **Same pattern everywhere.** A few application files existed both plain (older copies) and encrypted. XOR of each pair was non-zero up to offset 19999 and zero after it, and the pattern was the same for different files. One keystream, 20000 bytes, from offset 0.
-3. **The trap.** The first key came from a 1.2 MB Access database and was wrong in 6 bytes: the "plain" copy was an older version. The ZIP failed its CRC.
-4. **The fix.** Majority voting over many encrypted text files and decompressing the ZIP's deflate stream pinned down those 6 bytes. The ZIP entry, 60 MB unpacked from data spanning offsets 43 to 19999, now matches its CRC32. The RAR passes `7z t`, and the restored database passes `DBCC CHECKDB WITH DATA_PURITY`.
-5. **Result.** 782 files restored; all pass their format check except one whose original was 1241 zero bytes.
+3. **The trap.** The first key came from the largest pair, an application database, and was wrong in 6 bytes: the "plain" copy was an older version. The ZIP failed its CRC.
+4. **The fix.** Majority voting over many encrypted text files and decompressing the ZIP's deflate stream pinned down those 6 bytes. The backup inside the ZIP now matches its CRC32, a RAR with thousands of files passes `7z t`, and the restored database passes `DBCC CHECKDB WITH DATA_PURITY`.
+5. **Result.** Every file came back: databases, PDFs, spreadsheets, archives, application files. Everything that can be checked passes.
 
 Lessons: an "original" must be the exact same version, so compare the bytes after the encrypted zone first. Prove a key on something with checksums, not on how the output looks.
 

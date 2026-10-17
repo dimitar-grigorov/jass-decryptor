@@ -31,7 +31,7 @@ namespace JassDecryptor
         public const int N = 20000;
         const string Sha256 = "ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d";
         public const string FileName = "jass_keystream_20000.bin";
-        public static string Origin = "вграден";
+        public static string Origin = "built-in";
         public static readonly byte[] K = Load();
 
         static byte[] Load()
@@ -41,7 +41,7 @@ namespace JassDecryptor
             if (File.Exists(ext))
             {
                 var e = File.ReadAllBytes(ext);
-                if (e.Length != N) throw new InvalidDataException(FileName + " трябва да е точно " + N + " байта.");
+                if (e.Length != N) throw new InvalidDataException(FileName + " must be exactly " + N + " bytes.");
                 Origin = FileName;
                 return e;
             }
@@ -50,7 +50,7 @@ namespace JassDecryptor
                 var b = new byte[N];
                 int r = 0, n;
                 while (r < N && (n = s.Read(b, r, N - r)) > 0) r += n;
-                if (r != N || Util.Hex(SHA256.Create().ComputeHash(b)) != Sha256) throw new InvalidDataException("Вграденият ключ е повреден.");
+                if (r != N || Util.Hex(SHA256.Create().ComputeHash(b)) != Sha256) throw new InvalidDataException("The built-in key is damaged.");
                 return b;
             }
         }
@@ -246,17 +246,17 @@ namespace JassDecryptor
         public static Check Run(string name, JassStream s, byte[] h, int n)
         {
             long len = s.Length;
-            if (len == 0) return new Check("empty", Verdict.OK, "празен файл");
+            if (len == 0) return new Check("empty", Verdict.OK, "empty file");
             bool allZero = true;
             for (int i = 0; i < n && allZero; i++) if (h[i] != 0) allZero = false;
-            if (allZero && len <= n) return new Check("zeros", Verdict.UNVERIFIED, "само нули, като оригинала");
+            if (allZero && len <= n) return new Check("zeros", Verdict.UNVERIFIED, "all zeros, like the original");
 
             string exp = Expected(name), kind = Sniff(h, n);
             string e = Path.GetExtension(name).ToLowerInvariant();
             if (kind == null && Array.IndexOf(TextExt, e) >= 0) kind = "text";
             if (kind == null && exp == "xml") kind = "text";
             if (exp != null && kind != exp && !(exp == "xml" && kind == "text") && !(exp == "ole" && kind == "zip"))
-                return new Check(kind ?? "unknown", Verdict.CHECK, "разширението очаква " + exp + ", а съдържанието е " + (kind ?? "непознато"));
+                return new Check(kind ?? "unknown", Verdict.CHECK, "extension says " + exp + ", content is " + (kind ?? "unknown"));
 
             try
             {
@@ -267,43 +267,43 @@ namespace JassDecryptor
                     case "jpeg": return Jpeg(h, n);
                     case "pdf":
                         return Regex.IsMatch(Encoding.ASCII.GetString(h, 0, n), @"\d+\s+\d+\s+obj") || len < 2000
-                            ? new Check("pdf", Verdict.OK, "заглавие и обекти в началото")
-                            : new Check("pdf", Verdict.CHECK, "няма PDF обекти в началото");
-                    case "gif": return new Check("gif", Verdict.OK, "GIF заглавие");
-                    case "bmp": return Util.U32(h, 2) == len ? new Check("bmp", Verdict.OK, "размерът в заглавието съвпада") : new Check("bmp", Verdict.CHECK, "размерът в заглавието не съвпада");
-                    case "rar": return new Check("rar", Verdict.UNVERIFIED, "RAR заглавие; пълен тест с 7-Zip");
-                    case "7z": return new Check("7z", Verdict.UNVERIFIED, "7z заглавие; пълен тест с 7-Zip");
+                            ? new Check("pdf", Verdict.OK, "header and objects at the start")
+                            : new Check("pdf", Verdict.CHECK, "no PDF objects at the start");
+                    case "gif": return new Check("gif", Verdict.OK, "GIF header");
+                    case "bmp": return Util.U32(h, 2) == len ? new Check("bmp", Verdict.OK, "size in header matches") : new Check("bmp", Verdict.CHECK, "size in header does not match");
+                    case "rar": return new Check("rar", Verdict.UNVERIFIED, "RAR header; full test needs 7-Zip");
+                    case "7z": return new Check("7z", Verdict.UNVERIFIED, "7z header; full test needs 7-Zip");
                     case "ole":
                         return n >= 32 && h[28] == 0xFE && h[29] == 0xFF && (h[30] == 9 || h[30] == 12)
-                            ? new Check("ole", Verdict.OK, "OLE заглавие (doc/xls/msg); отворете за пълна проверка")
-                            : new Check("ole", Verdict.CHECK, "OLE заглавието е невалидно");
+                            ? new Check("ole", Verdict.OK, "OLE header (doc/xls/msg); open it to be sure")
+                            : new Check("ole", Verdict.CHECK, "invalid OLE header");
                     case "sql-bak":
                         {
                             ushort x = 0;
                             for (int i = 0; i < 50; i += 2) x ^= Util.U16(h, i);
                             return n >= 52 && x == Util.U16(h, 50)
-                                ? new Check("sql-bak", Verdict.OK, "MTF заглавие; пълна проверка: RESTORE VERIFYONLY")
-                                : new Check("sql-bak", Verdict.CHECK, "MTF контролната сума не съвпада");
+                                ? new Check("sql-bak", Verdict.OK, "MTF header; full check: RESTORE VERIFYONLY")
+                                : new Check("sql-bak", Verdict.CHECK, "MTF checksum does not match");
                         }
-                    case "sql-data": return new Check("sql-data", Verdict.OK, "заглавна страница; пълна проверка: attach + DBCC CHECKDB");
-                    case "access": return new Check("access", Verdict.OK, "Jet/ACE заглавие");
+                    case "sql-data": return new Check("sql-data", Verdict.OK, "header page; full check: attach + DBCC CHECKDB");
+                    case "access": return new Check("access", Verdict.OK, "Jet/ACE header");
                     case "dotnet":
                         {
                             s.Position = len - 1;
-                            return s.ReadByte() == 0x0B ? new Check("dotnet", Verdict.OK, ".NET сериализация, начало и край") : new Check("dotnet", Verdict.CHECK, ".NET сериализация без край");
+                            return s.ReadByte() == 0x0B ? new Check("dotnet", Verdict.OK, ".NET serialization, start and end") : new Check("dotnet", Verdict.CHECK, ".NET serialization without end");
                         }
                     case "pe":
                         {
                             int pe = n >= 64 ? (int)Util.U32(h, 60) : -1;
                             return pe > 0 && pe + 4 <= n && h[pe] == 'P' && h[pe + 1] == 'E' && h[pe + 2] == 0 && h[pe + 3] == 0
-                                ? new Check("pe", Verdict.OK, "PE заглавие") : new Check("pe", Verdict.CHECK, "MZ без PE заглавие");
+                                ? new Check("pe", Verdict.OK, "PE header") : new Check("pe", Verdict.CHECK, "MZ without PE header");
                         }
                     case "xml": return Xml(s, len);
                     case "text": return Text(h, n);
                 }
             }
-            catch (Exception ex) { return new Check(kind, Verdict.CHECK, "грешка при проверка: " + ex.Message); }
-            return new Check("unknown", Verdict.UNVERIFIED, "непознат формат");
+            catch (Exception ex) { return new Check(kind, Verdict.CHECK, "check failed: " + ex.Message); }
+            return new Check("unknown", Verdict.UNVERIFIED, "unknown format");
         }
 
         // Verifies CRC32 of every entry whose data lies (partly) in the decrypted zone; the rest of the file was never encrypted.
@@ -315,17 +315,17 @@ namespace JassDecryptor
             Util.ReadFull(s, tail, 0, tl);
             int eocd = -1;
             for (int i = tl - 22; i >= 0; i--) if (tail[i] == 0x50 && tail[i + 1] == 0x4B && tail[i + 2] == 5 && tail[i + 3] == 6) { eocd = i; break; }
-            if (eocd < 0) return new Check("zip", Verdict.CHECK, "няма централна директория");
+            if (eocd < 0) return new Check("zip", Verdict.CHECK, "no central directory");
             uint cdSize = Util.U32(tail, eocd + 12), cdOff = Util.U32(tail, eocd + 16);
-            if (cdOff == 0xFFFFFFFF || cdSize > 256 * 1024 * 1024) return new Check("zip", Verdict.UNVERIFIED, "ZIP64; само заглавие");
+            if (cdOff == 0xFFFFFFFF || cdSize > 256 * 1024 * 1024) return new Check("zip", Verdict.UNVERIFIED, "ZIP64; header only");
             var cd = new byte[cdSize];
             s.Position = cdOff;
-            if (Util.ReadFull(s, cd, 0, (int)cdSize) != cdSize) return new Check("zip", Verdict.CHECK, "отрязана централна директория");
+            if (Util.ReadFull(s, cd, 0, (int)cdSize) != cdSize) return new Check("zip", Verdict.CHECK, "truncated central directory");
             int checkedN = 0, skipped = 0;
             var buf = new byte[1 << 16];
             for (int p = 0; p + 46 <= cdSize; )
             {
-                if (Util.U32(cd, p) != 0x02014B50) return new Check("zip", Verdict.CHECK, "повредена централна директория");
+                if (Util.U32(cd, p) != 0x02014B50) return new Check("zip", Verdict.CHECK, "damaged central directory");
                 ushort flags = Util.U16(cd, p + 8), method = Util.U16(cd, p + 10);
                 uint crc = Util.U32(cd, p + 16), comp = Util.U32(cd, p + 20), lho = Util.U32(cd, p + 42);
                 int nl = Util.U16(cd, p + 28), el = Util.U16(cd, p + 30), cl = Util.U16(cd, p + 32);
@@ -334,7 +334,7 @@ namespace JassDecryptor
                 if (lho >= Keystream.N) continue;
                 var lh = new byte[30];
                 s.Position = lho;
-                if (Util.ReadFull(s, lh, 0, 30) != 30 || Util.U32(lh, 0) != 0x04034B50) return new Check("zip", Verdict.CHECK, "лош локален хедър: " + ename);
+                if (Util.ReadFull(s, lh, 0, 30) != 30 || Util.U32(lh, 0) != 0x04034B50) return new Check("zip", Verdict.CHECK, "bad local header: " + ename);
                 long data = lho + 30 + Util.U16(lh, 26) + Util.U16(lh, 28);
                 if ((flags & 1) != 0 || (method != 0 && method != 8)) { skipped++; continue; }
                 Stream src = new SubStream(s, data, comp);
@@ -342,12 +342,12 @@ namespace JassDecryptor
                 uint c = 0;
                 int r;
                 try { while ((r = src.Read(buf, 0, buf.Length)) > 0) c = Util.Crc32(c, buf, 0, r); }
-                catch (InvalidDataException) { return new Check("zip", Verdict.CHECK, "лоши компресирани данни: " + ename); }
-                if (c != crc) return new Check("zip", Verdict.CHECK, "CRC32 не съвпада: " + ename);
+                catch (InvalidDataException) { return new Check("zip", Verdict.CHECK, "bad compressed data: " + ename); }
+                if (c != crc) return new Check("zip", Verdict.CHECK, "CRC32 mismatch: " + ename);
                 checkedN++;
             }
-            if (checkedN == 0) return new Check("zip", Verdict.UNVERIFIED, skipped > 0 ? "записите са криптирани с парола или с непознат метод" : "няма записи за проверка");
-            return new Check("zip", Verdict.OK, "CRC32 съвпада (" + checkedN + " записа в зоната)");
+            if (checkedN == 0) return new Check("zip", Verdict.UNVERIFIED, skipped > 0 ? "entries are password-protected or use an unknown method" : "no entries to check");
+            return new Check("zip", Verdict.OK, "CRC32 OK, entries checked: " + checkedN);
         }
 
         static Check Png(Stream s, long len)
@@ -359,15 +359,15 @@ namespace JassDecryptor
                 s.Position = p;
                 Util.ReadFull(s, hd, 0, 8);
                 uint n = Util.U32BE(hd, 0);
-                if (n > 64 * 1024 * 1024 || p + 12 + n > len) return new Check("png", Verdict.CHECK, "лош чънк на " + p);
+                if (n > 64 * 1024 * 1024 || p + 12 + n > len) return new Check("png", Verdict.CHECK, "bad chunk at " + p);
                 var d = new byte[n + 4];
                 Util.ReadFull(s, d, 0, (int)n + 4);
                 uint c = Util.Crc32(Util.Crc32(0, hd, 4, 4), d, 0, (int)n);
-                if (c != Util.U32BE(d, (int)n)) return new Check("png", Verdict.CHECK, "CRC на чънк не съвпада на " + p);
+                if (c != Util.U32BE(d, (int)n)) return new Check("png", Verdict.CHECK, "chunk CRC mismatch at " + p);
                 if (Encoding.ASCII.GetString(hd, 4, 4) == "IEND") break;
                 p += 12 + n;
             }
-            return new Check("png", Verdict.OK, "CRC32 на чънковете съвпада");
+            return new Check("png", Verdict.OK, "chunk CRC32s match");
         }
 
         static Check Jpeg(byte[] h, int n)
@@ -375,25 +375,25 @@ namespace JassDecryptor
             int p = 2;
             while (p + 4 <= n)
             {
-                if (h[p] != 0xFF) return new Check("jpeg", Verdict.CHECK, "лош маркер на " + p);
-                if (h[p + 1] == 0xDA) return new Check("jpeg", Verdict.OK, "маркерите до данните са верни");
+                if (h[p] != 0xFF) return new Check("jpeg", Verdict.CHECK, "bad marker at " + p);
+                if (h[p + 1] == 0xDA) return new Check("jpeg", Verdict.OK, "markers up to the image data are valid");
                 p += 2 + (h[p + 2] << 8 | h[p + 3]);
             }
-            return new Check("jpeg", Verdict.OK, "маркерите в началото са верни");
+            return new Check("jpeg", Verdict.OK, "markers at the start are valid");
         }
 
         static Check Xml(Stream s, long len)
         {
-            if (len > 64L * 1024 * 1024) return new Check("xml", Verdict.UNVERIFIED, "голям XML; само заглавие");
+            if (len > 64L * 1024 * 1024) return new Check("xml", Verdict.UNVERIFIED, "large XML; header only");
             s.Position = 0;
             try
             {
                 // A TextReader ignores the declared encoding: .NET apps often write encoding="utf-16" into UTF-8 files.
                 using (var r = XmlReader.Create(new StreamReader(s, Encoding.UTF8, true), new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore }))
                     while (r.Read()) { }
-                return new Check("xml", Verdict.OK, "добре оформен XML");
+                return new Check("xml", Verdict.OK, "well-formed XML");
             }
-            catch (XmlException ex) { return new Check("xml", Verdict.CHECK, "невалиден XML: " + ex.Message); }
+            catch (XmlException ex) { return new Check("xml", Verdict.CHECK, "invalid XML: " + ex.Message); }
         }
 
         static Check Text(byte[] h, int n)
@@ -404,7 +404,7 @@ namespace JassDecryptor
             else t = Encoding.GetEncoding(1251).GetString(h, 0, Math.Min(n, Keystream.N));
             int bad = 0;
             foreach (char c in t) if (c < 9 || (c > 13 && c < 32 && c != 26)) bad++;
-            return bad == 0 ? new Check("text", Verdict.OK, "четим текст") : new Check("text", Verdict.CHECK, bad + " управляващи символа");
+            return bad == 0 ? new Check("text", Verdict.OK, "readable text") : new Check("text", Verdict.CHECK, bad + " control characters");
         }
     }
 
@@ -511,8 +511,8 @@ namespace JassDecryptor
                 r.Size = fi.Length;
                 int layers;
                 string bn = BaseName(fi.Name, out layers);
-                if (bn.Length == 0) { r.Action = Action.Skipped; r.Note = "няма име след махане на .jass"; return r; }
-                if (layers > 1) r.Note = layers + " пъти .jass; ";
+                if (bn.Length == 0) { r.Action = Action.Skipped; r.Note = "no name left after removing .jass"; return r; }
+                if (layers > 1) r.Note = layers + " times .jass; ";
                 string target = Path.Combine(fi.DirectoryName, bn);
                 r.Target = target;
                 Check c;
@@ -529,7 +529,7 @@ namespace JassDecryptor
                         if (SameContent(s, target)) { r.Action = Action.AlreadySame; return r; }
                         existing = target;
                         Conflict choice = ask(r, target);
-                        if (choice == Conflict.Skip) { r.Action = Action.Skipped; r.Note = "има различен файл; " + r.Note; return r; }
+                        if (choice == Conflict.Skip) { r.Action = Action.Skipped; r.Note = "a different file exists; " + r.Note; return r; }
                         if (choice == Conflict.Beside)
                         {
                             for (int i = 1; ; i++)
@@ -565,7 +565,7 @@ namespace JassDecryptor
                             for (int i = 2; File.Exists(old); i++) old = Tagged(existing, " (old " + i + ")");
                             File.Move(existing, old);
                             File.Move(tmp, target);
-                            r.Action = Action.Replaced; r.Note = "старият: " + Path.GetFileName(old) + "; " + r.Note;
+                            r.Action = Action.Replaced; r.Note = "old one: " + Path.GetFileName(old) + "; " + r.Note;
                         }
                         else
                         {
@@ -584,7 +584,7 @@ namespace JassDecryptor
             {
                 bool locked = (Marshal.GetHRForException(ex) & 0xFFFF) == 32 || (Marshal.GetHRForException(ex) & 0xFFFF) == 33;
                 r.Action = locked ? Action.Locked : Action.Error;
-                r.Note = (locked ? "отворен от друга програма; " : ex.Message + "; ") + r.Note;
+                r.Note = (locked ? "open in another program; " : ex.Message + "; ") + r.Note;
             }
             catch (Exception ex) { r.Action = Action.Error; r.Note = ex.Message + "; " + r.Note; }
             return r;
@@ -645,7 +645,7 @@ namespace JassDecryptor
                 bool ok = pr.StandardOutput.ReadToEnd().Contains("Everything is Ok");
                 pr.WaitForExit();
                 r.Verdict = ok ? Verdict.OK : Verdict.CHECK;
-                r.Note = r.Note.Replace(headerNote, ok ? "7-Zip тест: всички CRC съвпадат" : "7-Zip тестът не мина");
+                r.Note = r.Note.Replace(headerNote, ok ? "7-Zip test: all CRCs match" : "7-Zip test failed");
             }
         }
 
@@ -685,15 +685,15 @@ namespace JassDecryptor
         {
             switch (a)
             {
-                case Action.Restored: return "Възстановен";
-                case Action.AlreadySame: return "Вече е наличен";
-                case Action.SavedBeside: return "Записан отделно";
-                case Action.Replaced: return "Заменен";
-                case Action.Skipped: return "Пропуснат";
-                case Action.Locked: return "Зает";
-                case Action.NoSpace: return "Няма място";
-                case Action.Cancelled: return "Спрян";
-                default: return "Грешка";
+                case Action.Restored: return "Restored";
+                case Action.AlreadySame: return "Already there";
+                case Action.SavedBeside: return "Saved beside";
+                case Action.Replaced: return "Replaced";
+                case Action.Skipped: return "Skipped";
+                case Action.Locked: return "In use";
+                case Action.NoSpace: return "Disk full";
+                case Action.Cancelled: return "Stopped";
+                default: return "Error";
             }
         }
     }
@@ -701,12 +701,12 @@ namespace JassDecryptor
     class MainForm : Form
     {
         readonly TextBox pathBox = new TextBox { ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right };
-        readonly Button folderBtn = new Button { Text = "Папка…" };
-        readonly Button fileBtn = new Button { Text = "Файл…" };
-        readonly Button startBtn = new Button { Text = "Възстанови", Enabled = false };
-        readonly Button stopBtn = new Button { Text = "Спри", Enabled = false };
-        readonly Button reportBtn = new Button { Text = "Отвори отчета", Enabled = false };
-        readonly CheckBox onlyProblems = new CheckBox { Text = "Само проблемните", AutoSize = true, Anchor = AnchorStyles.Left };
+        readonly Button folderBtn = new Button { Text = "Folder…" };
+        readonly Button fileBtn = new Button { Text = "File…" };
+        readonly Button startBtn = new Button { Text = "Restore", Enabled = false };
+        readonly Button stopBtn = new Button { Text = "Stop", Enabled = false };
+        readonly Button reportBtn = new Button { Text = "Open report", Enabled = false };
+        readonly CheckBox onlyProblems = new CheckBox { Text = "Problems only", AutoSize = true, Anchor = AnchorStyles.Left };
         readonly ListView list = new ListView { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill };
         readonly ProgressBar bar = new ProgressBar { Anchor = AnchorStyles.Left | AnchorStyles.Right };
         readonly Label status = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
@@ -733,7 +733,7 @@ namespace JassDecryptor
 
             var info = new Label
             {
-                Text = "Изберете или пуснете тук папка или файл. Всеки файл се възстановява до своя .jass, който не се променя.",
+                Text = "Choose or drop a folder or a file here. Each file is restored next to its .jass, which stays unchanged.",
                 AutoSize = true, Margin = new Padding(3, 3, 3, px(6))
             };
             foreach (var b in new[] { folderBtn, fileBtn, startBtn, stopBtn, reportBtn })
@@ -746,8 +746,8 @@ namespace JassDecryptor
             top.Controls.Add(info, 0, 0); top.SetColumnSpan(info, 4);
             top.Controls.Add(pathBox, 0, 1); top.Controls.Add(folderBtn, 1, 1); top.Controls.Add(fileBtn, 2, 1); top.Controls.Add(startBtn, 3, 1);
 
-            list.Columns.Add("Файл", px(360)); list.Columns.Add("Размер", px(75), HorizontalAlignment.Right);
-            list.Columns.Add("Резултат", px(150)); list.Columns.Add("Проверка", px(85)); list.Columns.Add("Бележка", px(420));
+            list.Columns.Add("File", px(360)); list.Columns.Add("Size", px(75), HorizontalAlignment.Right);
+            list.Columns.Add("Result", px(150)); list.Columns.Add("Check", px(85)); list.Columns.Add("Note", px(420));
             var mid = new Panel { Dock = DockStyle.Fill, Padding = new Padding(px(8)) };
             mid.Controls.Add(list);
 
@@ -763,16 +763,16 @@ namespace JassDecryptor
 
             folderBtn.Click += delegate
             {
-                using (var d = new FolderBrowserDialog { Description = "Папка с .jass файлове" })
+                using (var d = new FolderBrowserDialog { Description = "Folder with .jass files" })
                     if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.SelectedPath);
             };
             fileBtn.Click += delegate
             {
-                using (var d = new OpenFileDialog { Filter = ".jass файлове|*.jass*|Всички файлове|*.*" })
+                using (var d = new OpenFileDialog { Filter = ".jass files|*.jass*|All files|*.*" })
                     if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.FileName);
             };
             startBtn.Click += delegate { Start(); };
-            stopBtn.Click += delegate { stop = true; stopBtn.Enabled = false; status.Text = "Спиране след текущия файл…"; };
+            stopBtn.Click += delegate { stop = true; stopBtn.Enabled = false; status.Text = "Stopping after the current file…"; };
             reportBtn.Click += delegate { if (reportPath != null) Process.Start("explorer.exe", "/select,\"" + reportPath + "\""); };
             onlyProblems.CheckedChanged += delegate { Refill(); };
             DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) && !stopBtn.Enabled ? DragDropEffects.Copy : DragDropEffects.None; };
@@ -780,7 +780,7 @@ namespace JassDecryptor
             flush.Tick += delegate { Flush(); };
             FormClosing += (s, e) =>
             {
-                if (stopBtn.Enabled && MessageBox.Show(this, "Да спра ли?", Text, MessageBoxButtons.YesNo) == DialogResult.No) e.Cancel = true;
+                if (stopBtn.Enabled && MessageBox.Show(this, "Stop now?", Text, MessageBoxButtons.YesNo) == DialogResult.No) e.Cancel = true;
                 else stop = true;
             };
         }
@@ -789,7 +789,7 @@ namespace JassDecryptor
         {
             root = p; pathBox.Text = p;
             list.Items.Clear(); results.Clear(); reportPath = null; reportBtn.Enabled = false;
-            status.Text = "Търсене на .jass файлове…";
+            status.Text = "Looking for .jass files…";
             startBtn.Enabled = false;
             var t = new Thread(() =>
             {
@@ -800,7 +800,7 @@ namespace JassDecryptor
                 BeginInvoke((MethodInvoker)delegate
                 {
                     files = f;
-                    status.Text = f.Count + " .jass файла, " + Util.Size(total) + "; ключ: " + Keystream.Origin + (errors.Count > 0 ? "; недостъпни папки: " + errors.Count : "");
+                    status.Text = f.Count + " .jass files, " + Util.Size(total) + "; key: " + Keystream.Origin + (errors.Count > 0 ? "; folders without access: " + errors.Count : "");
                     startBtn.Enabled = f.Count > 0;
                 });
             }) { IsBackground = true };
@@ -810,17 +810,17 @@ namespace JassDecryptor
         void Start()
         {
             int tested, passed;
-            status.Text = "Проверка на ключа…";
+            status.Text = "Checking the key…";
             string bad = Engine.Preflight(files, out tested, out passed);
             if (tested >= 3 && passed < tested * 0.8)
             {
-                MessageBox.Show(this, "Ключът не пасва: верни са " + passed + " от " + tested + " проверени файла (напр. " + bad + ").\nНищо не е записано.",
+                MessageBox.Show(this, "The key does not fit: " + passed + " of " + tested + " tested files decrypt correctly (e.g. " + bad + ").\nNothing was written.",
                     Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
-                status.Text = "Спряно: ключът не пасва (" + passed + "/" + tested + ")";
+                status.Text = "Stopped: the key does not fit (" + passed + "/" + tested + ")";
                 return;
             }
             // Small sets are checked file by file anyway.
-            if (tested < 3 && files.Count > 20 && MessageBox.Show(this, "Ключът не може да се провери предварително: малко файлове с познат формат.\nДа продължа ли?",
+            if (tested < 3 && files.Count > 20 && MessageBox.Show(this, "The key cannot be checked in advance: too few files of a known format.\nContinue?",
                     Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
 
@@ -857,11 +857,11 @@ namespace JassDecryptor
             Func<int, int> px = v => (int)(v * k);
             var fi = new FileInfo(existing);
             string name = fi.Name, stem = Path.GetFileNameWithoutExtension(name), ext = Path.GetExtension(name);
-            Func<long, string> size = n => Util.Size(n) + " (" + n.ToString("N0") + " байта)";
+            Func<long, string> size = n => Util.Size(n) + " (" + n.ToString("N0") + " bytes)";
 
             var d = new Form
             {
-                Text = "Файлът вече съществува", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                Text = "File already exists", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
                 MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, Font = Font, AutoScaleMode = AutoScaleMode.None,
                 AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(px(14))
             };
@@ -870,23 +870,23 @@ namespace JassDecryptor
             Func<string, Label> text = s => new Label { Text = s, AutoSize = true, MaximumSize = new Size(px(460), 0), Anchor = AnchorStyles.Left, Margin = new Padding(px(3)) };
             Action<Control, int> wide = (ctl, top) => { ctl.Margin = new Padding(px(3), px(top), px(3), px(3)); t.Controls.Add(ctl); t.SetColumnSpan(ctl, 2); };
 
-            var head = text("„" + name + "“ вече съществува и е различен.");
+            var head = text("\"" + name + "\" already exists and is different.");
             head.Font = new Font(Font, FontStyle.Bold); head.MaximumSize = new Size(px(520), 0);
             wide(head, 0);
             var folder = text(fi.DirectoryName); folder.ForeColor = SystemColors.GrayText; folder.MaximumSize = new Size(px(520), 0);
             wide(folder, 0);
-            t.Controls.Add(text("Съществуващ:")); t.Controls.Add(text(size(fi.Length) + ", " + fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm")));
-            t.Controls.Add(text("Възстановен:")); t.Controls.Add(text(size(r.Size)));
+            t.Controls.Add(text("Existing:")); t.Controls.Add(text(size(fi.Length) + ", " + fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm")));
+            t.Controls.Add(text("Restored:")); t.Controls.Add(text(size(r.Size)));
             t.Controls[t.Controls.Count - 1].Margin = new Padding(px(3), px(3), px(3), px(12));
 
-            var b1 = new Button { Text = "Запази и двата", DialogResult = DialogResult.Yes };
-            var b2 = new Button { Text = "Замени", DialogResult = DialogResult.No };
-            var b3 = new Button { Text = "Пропусни", DialogResult = DialogResult.Ignore };
+            var b1 = new Button { Text = "Keep both", DialogResult = DialogResult.Yes };
+            var b2 = new Button { Text = "Replace", DialogResult = DialogResult.No };
+            var b3 = new Button { Text = "Skip", DialogResult = DialogResult.Ignore };
             var what = new[]
             {
-                "Новият се записва като „" + stem + " (recovered)" + ext + "“.",
-                "Старият се преименува на „" + stem + " (old)" + ext + "“.",
-                "Нищо не се записва."
+                "The restored file is saved as \"" + stem + " (recovered)" + ext + "\".",
+                "The existing file is renamed to \"" + stem + " (old)" + ext + "\".",
+                "Nothing is written."
             };
             var bs = new[] { b1, b2, b3 };
             for (int i = 0; i < 3; i++)
@@ -894,7 +894,7 @@ namespace JassDecryptor
                 bs[i].AutoSize = true; bs[i].MinimumSize = new Size(px(120), px(28)); bs[i].Anchor = AnchorStyles.Left | AnchorStyles.Right;
                 t.Controls.Add(bs[i]); t.Controls.Add(text(what[i]));
             }
-            var all = new CheckBox { Text = "Същото за всички следващи", AutoSize = true };
+            var all = new CheckBox { Text = "Do the same for all remaining", AutoSize = true };
             wide(all, 12);
 
             d.Controls.Add(t);
@@ -918,7 +918,7 @@ namespace JassDecryptor
                 if (list.Items.Count > 0) list.EnsureVisible(list.Items.Count - 1);
             }
             bar.Value = Math.Min(bar.Maximum, doneCount);
-            status.Text = "Обработени " + doneCount + " от " + files.Count;
+            status.Text = "Processed " + doneCount + " of " + files.Count;
         }
 
         bool Show(Result r)
@@ -961,10 +961,10 @@ namespace JassDecryptor
             }
             var sb = new StringBuilder();
             foreach (var kv in cnt) sb.AppendLine(kv.Key + ": " + kv.Value);
-            sb.AppendLine("За проверка: " + problems);
-            if (reportPath != null) sb.AppendLine().AppendLine("Отчет: " + reportPath);
-            status.Text = (stop ? "Спряно: " : "Готово: ") + results.Count + " файла, за проверка " + problems;
-            MessageBox.Show(this, sb.ToString(), stop ? "Спряно" : "Готово", MessageBoxButtons.OK, problems > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            sb.AppendLine("Need a look: " + problems);
+            if (reportPath != null) sb.AppendLine().AppendLine("Report: " + reportPath);
+            status.Text = (stop ? "Stopped: " : "Done: ") + results.Count + " files, need a look: " + problems;
+            MessageBox.Show(this, sb.ToString(), stop ? "Stopped" : "Done", MessageBoxButtons.OK, problems > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
     }
 
