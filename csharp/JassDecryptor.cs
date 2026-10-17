@@ -1,0 +1,1039 @@
+// Copyright (c) 2026 Dimitar Grigorov. Licensed under the MIT License (see LICENSE).
+//
+// Jass Decryptor: restores files hit by the .jass ransomware. The first 20000 bytes of every file are XOR-ed with one fixed
+// keystream (embedded resource JassDecryptor.keystream, or jass_keystream_20000.bin placed next to the exe for another victim);
+// the rest of the file is untouched. Sources are only read, never changed.
+// Build: build.cmd (csc from .NET Framework 4, C# 5). Runs on any Windows with .NET Framework 4.0 or later.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using System.Xml;
+using Microsoft.Win32;
+
+[assembly: System.Reflection.AssemblyTitle("Jass Decryptor")]
+[assembly: System.Reflection.AssemblyProduct("Jass Decryptor")]
+[assembly: System.Reflection.AssemblyCopyright("Copyright © 2026 Dimitar Grigorov")]
+[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+
+namespace JassDecryptor
+{
+    static class Keystream
+    {
+        public const int N = 20000;
+        const string Sha256 = "ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d";
+        public const string FileName = "jass_keystream_20000.bin";
+        public static string Origin = "вграден";
+        public static readonly byte[] K = Load();
+
+        static byte[] Load()
+        {
+            // A keystream file next to the exe wins, so a victim with another key needs no rebuild.
+            string ext = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), FileName);
+            if (File.Exists(ext))
+            {
+                var e = File.ReadAllBytes(ext);
+                if (e.Length != N) throw new InvalidDataException(FileName + " трябва да е точно " + N + " байта.");
+                Origin = FileName;
+                return e;
+            }
+            using (var s = typeof(Keystream).Assembly.GetManifestResourceStream("JassDecryptor.keystream"))
+            {
+                var b = new byte[N];
+                int r = 0, n;
+                while (r < N && (n = s.Read(b, r, N - r)) > 0) r += n;
+                if (r != N || Util.Hex(SHA256.Create().ComputeHash(b)) != Sha256) throw new InvalidDataException("Вграденият ключ е повреден.");
+                return b;
+            }
+        }
+    }
+
+    static class Util
+    {
+        public static string Hex(byte[] b)
+        {
+            var sb = new StringBuilder();
+            foreach (var x in b) sb.Append(x.ToString("x2"));
+            return sb.ToString();
+        }
+
+        static readonly uint[] CrcTable = MakeCrcTable();
+        static uint[] MakeCrcTable()
+        {
+            var t = new uint[256];
+            for (uint i = 0; i < 256; i++)
+            {
+                uint c = i;
+                for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                t[i] = c;
+            }
+            return t;
+        }
+        public static uint Crc32(uint crc, byte[] b, int off, int len)
+        {
+            crc = ~crc;
+            for (int i = off; i < off + len; i++) crc = CrcTable[(crc ^ b[i]) & 0xFF] ^ (crc >> 8);
+            return ~crc;
+        }
+
+        public static int ReadFull(Stream s, byte[] b, int off, int len)
+        {
+            int r = 0, n;
+            while (r < len && (n = s.Read(b, off + r, len - r)) > 0) r += n;
+            return r;
+        }
+
+        public static string Size(long n)
+        {
+            if (n < 1024) return n + " B";
+            if (n < 1024 * 1024) return (n / 1024.0).ToString("0.0") + " KB";
+            if (n < 1024L * 1024 * 1024) return (n / 1048576.0).ToString("0.0") + " MB";
+            return (n / 1073741824.0).ToString("0.00") + " GB";
+        }
+
+        public static ushort U16(byte[] b, int o) { return (ushort)(b[o] | b[o + 1] << 8); }
+        public static uint U32(byte[] b, int o) { return (uint)(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24); }
+        public static uint U32BE(byte[] b, int o) { return (uint)(b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]); }
+
+        public static bool StartsWith(byte[] b, int len, params byte[] sig)
+        {
+            if (len < sig.Length) return false;
+            for (int i = 0; i < sig.Length; i++) if (b[i] != sig[i]) return false;
+            return true;
+        }
+    }
+
+    // Read-only view of a .jass file that yields the decrypted bytes; seekable, so format checks and copying share it.
+    class JassStream : Stream
+    {
+        readonly FileStream f;
+        readonly bool xor;
+        public JassStream(string path, bool xor)
+        {
+            // FileShare.Read: a file open for writing elsewhere (e.g. a live .mdf) fails here and is reported as locked.
+            f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+            this.xor = xor;
+        }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            long pos = f.Position;
+            int n = f.Read(buffer, offset, count);
+            if (xor)
+                for (int i = 0; i < n && pos + i < Keystream.N; i++) buffer[offset + i] ^= Keystream.K[pos + i];
+            return n;
+        }
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return true; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { return f.Length; } }
+        public override long Position { get { return f.Position; } set { f.Position = value; } }
+        public override long Seek(long offset, SeekOrigin origin) { return f.Seek(offset, origin); }
+        public override void Flush() { }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+        protected override void Dispose(bool disposing) { if (disposing) f.Dispose(); base.Dispose(disposing); }
+    }
+
+    class SubStream : Stream
+    {
+        readonly Stream s; readonly long start, len; long pos;
+        public SubStream(Stream s, long start, long len) { this.s = s; this.start = start; this.len = len; }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (pos >= len) return 0;
+            s.Position = start + pos;
+            int n = s.Read(buffer, offset, (int)Math.Min(count, len - pos));
+            pos += n;
+            return n;
+        }
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { return len; } }
+        public override long Position { get { return pos; } set { throw new NotSupportedException(); } }
+        public override long Seek(long o, SeekOrigin r) { throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override void SetLength(long v) { throw new NotSupportedException(); }
+        public override void Write(byte[] b, int o, int c) { throw new NotSupportedException(); }
+    }
+
+    enum Verdict { OK, UNVERIFIED, CHECK }
+
+    class Check
+    {
+        public string Kind; public Verdict Verdict; public string Note;
+        public Check(string kind, Verdict v, string note) { Kind = kind; Verdict = v; Note = note; }
+    }
+
+    static class Formats
+    {
+        static readonly string[] ZipExt = { ".zip", ".docx", ".xlsx", ".pptx", ".docm", ".xlsm", ".odt", ".ods", ".odp", ".jar", ".apk", ".epub", ".vsdx" };
+        static readonly string[] XmlExt = { ".xml", ".config", ".xaml", ".resx", ".xsd", ".xsl", ".xslt", ".csproj", ".manifest", ".rdl", ".svg" };
+        static readonly string[] TextExt = { ".txt", ".log", ".csv", ".ini", ".json", ".htm", ".html", ".sql", ".bat", ".cmd", ".ps1", ".md", ".inf", ".reg" };
+        static readonly string[] OleExt = { ".doc", ".xls", ".ppt", ".msg", ".vsd", ".pub" };
+
+        // Kind the extension promises; null when the extension says nothing.
+        public static string Expected(string name)
+        {
+            string e = Path.GetExtension(name).ToLowerInvariant();
+            if (Array.IndexOf(ZipExt, e) >= 0) return "zip";
+            if (Array.IndexOf(OleExt, e) >= 0) return "ole";
+            if (Array.IndexOf(XmlExt, e) >= 0) return "xml";
+            switch (e)
+            {
+                case ".png": return "png";
+                case ".jpg": case ".jpeg": return "jpeg";
+                case ".pdf": return "pdf";
+                case ".gif": return "gif";
+                case ".bmp": return "bmp";
+                case ".rar": return "rar";
+                case ".7z": return "7z";
+                case ".mdb": case ".accdb": return "access";
+                case ".bak": return "sql-bak";
+                case ".mdf": case ".ndf": case ".ldf": return "sql-data";
+                case ".exe": case ".dll": return "pe";
+            }
+            return null;
+        }
+
+        public static string Sniff(byte[] h, int n)
+        {
+            if (Util.StartsWith(h, n, 0x50, 0x4B, 0x03, 0x04) || Util.StartsWith(h, n, 0x50, 0x4B, 0x05, 0x06)) return "zip";
+            if (Util.StartsWith(h, n, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) return "png";
+            if (Util.StartsWith(h, n, 0xFF, 0xD8, 0xFF)) return "jpeg";
+            if (Util.StartsWith(h, n, 0x25, 0x50, 0x44, 0x46)) return "pdf";
+            if (Util.StartsWith(h, n, 0x47, 0x49, 0x46, 0x38)) return "gif";
+            if (Util.StartsWith(h, n, 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07)) return "rar";
+            if (Util.StartsWith(h, n, 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C)) return "7z";
+            if (Util.StartsWith(h, n, 0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1)) return "ole";
+            if (Util.StartsWith(h, n, 0x54, 0x41, 0x50, 0x45)) return "sql-bak";
+            if (n >= 19 && (Encoding.ASCII.GetString(h, 4, 15) == "Standard Jet DB" || Encoding.ASCII.GetString(h, 4, 15) == "Standard ACE DB")) return "access";
+            if (Util.StartsWith(h, n, 0x00, 0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF)) return "dotnet";
+            if (n >= 8192 && h[0] == 1 && h[1] == 0x0F) return "sql-data";
+            if (Util.StartsWith(h, n, 0x4D, 0x5A)) return "pe";
+            if (Util.StartsWith(h, n, 0x42, 0x4D) && n >= 6) return "bmp";
+            if (LooksXml(h, n)) return "xml";
+            return null;
+        }
+
+        static bool LooksXml(byte[] h, int n)
+        {
+            int i = 0;
+            if (Util.StartsWith(h, n, 0xEF, 0xBB, 0xBF)) i = 3;
+            else if (Util.StartsWith(h, n, 0xFF, 0xFE) || Util.StartsWith(h, n, 0xFE, 0xFF))
+            {
+                // UTF-16: first non-space character must be '<'.
+                for (int j = 2; j + 1 < n; j += 2)
+                {
+                    char c = h[0] == 0xFF ? (char)(h[j] | h[j + 1] << 8) : (char)(h[j] << 8 | h[j + 1]);
+                    if (!char.IsWhiteSpace(c)) return c == '<';
+                }
+                return false;
+            }
+            while (i < n && (h[i] == ' ' || h[i] == '\t' || h[i] == '\r' || h[i] == '\n')) i++;
+            return i < n && h[i] == '<';
+        }
+
+        // Format check of the decrypted content. h/n is the decrypted head (up to 64 KB).
+        public static Check Run(string name, JassStream s, byte[] h, int n)
+        {
+            long len = s.Length;
+            if (len == 0) return new Check("empty", Verdict.OK, "празен файл");
+            bool allZero = true;
+            for (int i = 0; i < n && allZero; i++) if (h[i] != 0) allZero = false;
+            if (allZero && len <= n) return new Check("zeros", Verdict.UNVERIFIED, "само нули, като оригинала");
+
+            string exp = Expected(name), kind = Sniff(h, n);
+            string e = Path.GetExtension(name).ToLowerInvariant();
+            if (kind == null && Array.IndexOf(TextExt, e) >= 0) kind = "text";
+            if (kind == null && exp == "xml") kind = "text";
+            if (exp != null && kind != exp && !(exp == "xml" && kind == "text") && !(exp == "ole" && kind == "zip"))
+                return new Check(kind ?? "unknown", Verdict.CHECK, "разширението очаква " + exp + ", а съдържанието е " + (kind ?? "непознато"));
+
+            try
+            {
+                switch (kind)
+                {
+                    case "zip": return Zip(s, len);
+                    case "png": return Png(s, len);
+                    case "jpeg": return Jpeg(h, n);
+                    case "pdf":
+                        return Regex.IsMatch(Encoding.ASCII.GetString(h, 0, n), @"\d+\s+\d+\s+obj") || len < 2000
+                            ? new Check("pdf", Verdict.OK, "заглавие и обекти в началото")
+                            : new Check("pdf", Verdict.CHECK, "няма PDF обекти в началото");
+                    case "gif": return new Check("gif", Verdict.OK, "GIF заглавие");
+                    case "bmp": return Util.U32(h, 2) == len ? new Check("bmp", Verdict.OK, "размерът в заглавието съвпада") : new Check("bmp", Verdict.CHECK, "размерът в заглавието не съвпада");
+                    case "rar": return new Check("rar", Verdict.UNVERIFIED, "RAR заглавие; пълен тест с 7-Zip");
+                    case "7z": return new Check("7z", Verdict.UNVERIFIED, "7z заглавие; пълен тест с 7-Zip");
+                    case "ole":
+                        return n >= 32 && h[28] == 0xFE && h[29] == 0xFF && (h[30] == 9 || h[30] == 12)
+                            ? new Check("ole", Verdict.OK, "OLE заглавие (doc/xls/msg); отворете за пълна проверка")
+                            : new Check("ole", Verdict.CHECK, "OLE заглавието е невалидно");
+                    case "sql-bak":
+                        {
+                            ushort x = 0;
+                            for (int i = 0; i < 50; i += 2) x ^= Util.U16(h, i);
+                            return n >= 52 && x == Util.U16(h, 50)
+                                ? new Check("sql-bak", Verdict.OK, "MTF заглавие; пълна проверка: RESTORE VERIFYONLY")
+                                : new Check("sql-bak", Verdict.CHECK, "MTF контролната сума не съвпада");
+                        }
+                    case "sql-data": return new Check("sql-data", Verdict.OK, "заглавна страница; пълна проверка: attach + DBCC CHECKDB");
+                    case "access": return new Check("access", Verdict.OK, "Jet/ACE заглавие");
+                    case "dotnet":
+                        {
+                            s.Position = len - 1;
+                            return s.ReadByte() == 0x0B ? new Check("dotnet", Verdict.OK, ".NET сериализация, начало и край") : new Check("dotnet", Verdict.CHECK, ".NET сериализация без край");
+                        }
+                    case "pe":
+                        {
+                            int pe = n >= 64 ? (int)Util.U32(h, 60) : -1;
+                            return pe > 0 && pe + 4 <= n && h[pe] == 'P' && h[pe + 1] == 'E' && h[pe + 2] == 0 && h[pe + 3] == 0
+                                ? new Check("pe", Verdict.OK, "PE заглавие") : new Check("pe", Verdict.CHECK, "MZ без PE заглавие");
+                        }
+                    case "xml": return Xml(s, len);
+                    case "text": return Text(h, n);
+                }
+            }
+            catch (Exception ex) { return new Check(kind, Verdict.CHECK, "грешка при проверка: " + ex.Message); }
+            return new Check("unknown", Verdict.UNVERIFIED, "непознат формат");
+        }
+
+        // Verifies CRC32 of every entry whose data lies (partly) in the decrypted zone; the rest of the file was never encrypted.
+        static Check Zip(Stream s, long len)
+        {
+            int tl = (int)Math.Min(len, 65557);
+            var tail = new byte[tl];
+            s.Position = len - tl;
+            Util.ReadFull(s, tail, 0, tl);
+            int eocd = -1;
+            for (int i = tl - 22; i >= 0; i--) if (tail[i] == 0x50 && tail[i + 1] == 0x4B && tail[i + 2] == 5 && tail[i + 3] == 6) { eocd = i; break; }
+            if (eocd < 0) return new Check("zip", Verdict.CHECK, "няма централна директория");
+            uint cdSize = Util.U32(tail, eocd + 12), cdOff = Util.U32(tail, eocd + 16);
+            if (cdOff == 0xFFFFFFFF || cdSize > 256 * 1024 * 1024) return new Check("zip", Verdict.UNVERIFIED, "ZIP64; само заглавие");
+            var cd = new byte[cdSize];
+            s.Position = cdOff;
+            if (Util.ReadFull(s, cd, 0, (int)cdSize) != cdSize) return new Check("zip", Verdict.CHECK, "отрязана централна директория");
+            int checkedN = 0, skipped = 0;
+            var buf = new byte[1 << 16];
+            for (int p = 0; p + 46 <= cdSize; )
+            {
+                if (Util.U32(cd, p) != 0x02014B50) return new Check("zip", Verdict.CHECK, "повредена централна директория");
+                ushort flags = Util.U16(cd, p + 8), method = Util.U16(cd, p + 10);
+                uint crc = Util.U32(cd, p + 16), comp = Util.U32(cd, p + 20), lho = Util.U32(cd, p + 42);
+                int nl = Util.U16(cd, p + 28), el = Util.U16(cd, p + 30), cl = Util.U16(cd, p + 32);
+                string ename = Encoding.UTF8.GetString(cd, p + 46, nl);
+                p += 46 + nl + el + cl;
+                if (lho >= Keystream.N) continue;
+                var lh = new byte[30];
+                s.Position = lho;
+                if (Util.ReadFull(s, lh, 0, 30) != 30 || Util.U32(lh, 0) != 0x04034B50) return new Check("zip", Verdict.CHECK, "лош локален хедър: " + ename);
+                long data = lho + 30 + Util.U16(lh, 26) + Util.U16(lh, 28);
+                if ((flags & 1) != 0 || (method != 0 && method != 8)) { skipped++; continue; }
+                Stream src = new SubStream(s, data, comp);
+                if (method == 8) src = new DeflateStream(src, CompressionMode.Decompress);
+                uint c = 0;
+                int r;
+                try { while ((r = src.Read(buf, 0, buf.Length)) > 0) c = Util.Crc32(c, buf, 0, r); }
+                catch (InvalidDataException) { return new Check("zip", Verdict.CHECK, "лоши компресирани данни: " + ename); }
+                if (c != crc) return new Check("zip", Verdict.CHECK, "CRC32 не съвпада: " + ename);
+                checkedN++;
+            }
+            if (checkedN == 0) return new Check("zip", Verdict.UNVERIFIED, skipped > 0 ? "записите са криптирани с парола или с непознат метод" : "няма записи за проверка");
+            return new Check("zip", Verdict.OK, "CRC32 съвпада (" + checkedN + " записа в зоната)");
+        }
+
+        static Check Png(Stream s, long len)
+        {
+            long p = 8;
+            var hd = new byte[8];
+            while (p < Keystream.N && p + 12 <= len)
+            {
+                s.Position = p;
+                Util.ReadFull(s, hd, 0, 8);
+                uint n = Util.U32BE(hd, 0);
+                if (n > 64 * 1024 * 1024 || p + 12 + n > len) return new Check("png", Verdict.CHECK, "лош чънк на " + p);
+                var d = new byte[n + 4];
+                Util.ReadFull(s, d, 0, (int)n + 4);
+                uint c = Util.Crc32(Util.Crc32(0, hd, 4, 4), d, 0, (int)n);
+                if (c != Util.U32BE(d, (int)n)) return new Check("png", Verdict.CHECK, "CRC на чънк не съвпада на " + p);
+                if (Encoding.ASCII.GetString(hd, 4, 4) == "IEND") break;
+                p += 12 + n;
+            }
+            return new Check("png", Verdict.OK, "CRC32 на чънковете съвпада");
+        }
+
+        static Check Jpeg(byte[] h, int n)
+        {
+            int p = 2;
+            while (p + 4 <= n)
+            {
+                if (h[p] != 0xFF) return new Check("jpeg", Verdict.CHECK, "лош маркер на " + p);
+                if (h[p + 1] == 0xDA) return new Check("jpeg", Verdict.OK, "маркерите до данните са верни");
+                p += 2 + (h[p + 2] << 8 | h[p + 3]);
+            }
+            return new Check("jpeg", Verdict.OK, "маркерите в началото са верни");
+        }
+
+        static Check Xml(Stream s, long len)
+        {
+            if (len > 64L * 1024 * 1024) return new Check("xml", Verdict.UNVERIFIED, "голям XML; само заглавие");
+            s.Position = 0;
+            try
+            {
+                // A TextReader ignores the declared encoding: .NET apps often write encoding="utf-16" into UTF-8 files.
+                using (var r = XmlReader.Create(new StreamReader(s, Encoding.UTF8, true), new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore }))
+                    while (r.Read()) { }
+                return new Check("xml", Verdict.OK, "добре оформен XML");
+            }
+            catch (XmlException ex) { return new Check("xml", Verdict.CHECK, "невалиден XML: " + ex.Message); }
+        }
+
+        static Check Text(byte[] h, int n)
+        {
+            string t;
+            if (Util.StartsWith(h, n, 0xFF, 0xFE)) t = Encoding.Unicode.GetString(h, 2, (n - 2) & ~1);
+            else if (Util.StartsWith(h, n, 0xFE, 0xFF)) t = Encoding.BigEndianUnicode.GetString(h, 2, (n - 2) & ~1);
+            else t = Encoding.GetEncoding(1251).GetString(h, 0, Math.Min(n, Keystream.N));
+            int bad = 0;
+            foreach (char c in t) if (c < 9 || (c > 13 && c < 32 && c != 26)) bad++;
+            return bad == 0 ? new Check("text", Verdict.OK, "четим текст") : new Check("text", Verdict.CHECK, bad + " управляващи символа");
+        }
+    }
+
+    enum Action { Restored, AlreadySame, SavedBeside, Replaced, Skipped, Locked, NoSpace, Error, Cancelled }
+
+    enum Conflict { Beside, Replace, Skip }
+
+    class Result
+    {
+        public string Source, Target, Kind = "", Note = "";
+        public long Size;
+        public Action Action;
+        public Verdict Verdict = Verdict.UNVERIFIED;
+
+        public bool IsProblem
+        {
+            get { return Verdict == Verdict.CHECK || Action == Action.Error || Action == Action.Locked || Action == Action.NoSpace; }
+        }
+    }
+
+    static class Engine
+    {
+        static readonly Regex Suffix = new Regex(@"\.jass(\s.*)?$", RegexOptions.IgnoreCase);
+
+        public static bool IsJass(string path) { return Suffix.IsMatch(Path.GetFileName(path)); }
+
+        public static List<string> Collect(string path, List<string> errors)
+        {
+            var list = new List<string>();
+            if (File.Exists(path)) { if (IsJass(path)) list.Add(path); return list; }
+            var stack = new Stack<string>();
+            stack.Push(path);
+            while (stack.Count > 0)
+            {
+                string d = stack.Pop();
+                try
+                {
+                    foreach (var f in Directory.GetFiles(d)) if (IsJass(f)) list.Add(f);
+                    foreach (var sd in Directory.GetDirectories(d))
+                        if ((File.GetAttributes(sd) & FileAttributes.ReparsePoint) == 0) stack.Push(sd);
+                }
+                catch (Exception ex) { errors.Add(d + ": " + ex.Message); }
+            }
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        // Strips every .jass layer. XOR applied twice cancels out, so an even number of layers means plain content.
+        public static string BaseName(string name, out int layers)
+        {
+            layers = 0;
+            while (Suffix.IsMatch(name)) { name = Suffix.Replace(name, ""); layers++; }
+            return name;
+        }
+
+        static int ReadHead(JassStream s, byte[] h)
+        {
+            s.Position = 0;
+            return Util.ReadFull(s, h, 0, h.Length);
+        }
+
+        // Checks that the stream fits this machine: files with a clear signature must decrypt to it.
+        public static string Preflight(List<string> files, out int tested, out int passed)
+        {
+            tested = 0; passed = 0;
+            var h = new byte[16384];
+            var bad = new List<string>();
+            int step = Math.Max(1, files.Count / 400);
+            for (int i = 0; i < files.Count && tested < 40; i += step)
+            {
+                int layers;
+                string bn = BaseName(Path.GetFileName(files[i]), out layers);
+                string exp = Formats.Expected(bn);
+                if (exp == null || layers % 2 == 0) continue;
+                try
+                {
+                    using (var s = new JassStream(files[i], true))
+                    {
+                        if (s.Length < 64) continue;
+                        int n = ReadHead(s, h);
+                        bool zero = true;
+                        for (int j = 0; j < n && zero; j++) if (h[j] != 0) zero = false;
+                        if (zero) continue;
+                        tested++;
+                        string k = Formats.Sniff(h, n);
+                        if (k == exp || (exp == "ole" && k == "zip")) passed++;
+                        else bad.Add(Path.GetFileName(files[i]));
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return bad.Count == 0 ? "" : string.Join(", ", bad.GetRange(0, Math.Min(5, bad.Count)).ToArray());
+        }
+
+        public delegate Conflict AskConflict(Result r, string existing);
+
+        public static Result ProcessOne(string src, AskConflict ask, Func<bool> cancelled)
+        {
+            var r = new Result { Source = src };
+            try
+            {
+                var fi = new FileInfo(src);
+                r.Size = fi.Length;
+                int layers;
+                string bn = BaseName(fi.Name, out layers);
+                if (bn.Length == 0) { r.Action = Action.Skipped; r.Note = "няма име след махане на .jass"; return r; }
+                if (layers > 1) r.Note = layers + " пъти .jass; ";
+                string target = Path.Combine(fi.DirectoryName, bn);
+                r.Target = target;
+                Check c;
+                using (var s = new JassStream(src, layers % 2 == 1))
+                {
+                    var h = new byte[(int)Math.Min(s.Length, 65536)];
+                    int n = ReadHead(s, h);
+                    c = Formats.Run(bn, s, h, n);
+                    r.Kind = c.Kind; r.Verdict = c.Verdict; r.Note += c.Note;
+
+                    string existing = null;
+                    if (File.Exists(target))
+                    {
+                        if (SameContent(s, target)) { r.Action = Action.AlreadySame; return r; }
+                        existing = target;
+                        Conflict choice = ask(r, target);
+                        if (choice == Conflict.Skip) { r.Action = Action.Skipped; r.Note = "има различен файл; " + r.Note; return r; }
+                        if (choice == Conflict.Beside)
+                        {
+                            for (int i = 1; ; i++)
+                            {
+                                target = Tagged(existing, i == 1 ? " (recovered)" : " (recovered " + i + ")");
+                                if (!File.Exists(target)) break;
+                                if (SameContent(s, target)) { r.Target = target; r.Action = Action.AlreadySame; r.Note = Path.GetFileName(target) + "; " + r.Note; return r; }
+                            }
+                        }
+                    }
+
+                    if (!HasSpace(target, s.Length)) { r.Action = Action.NoSpace; return r; }
+                    string tmp = target + ".jassdecryptor-partial";
+                    if (File.Exists(tmp)) File.Delete(tmp);
+                    bool done = false;
+                    try
+                    {
+                        using (var o = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16))
+                        {
+                            s.Position = 0;
+                            var buf = new byte[1 << 20];
+                            int rd;
+                            while ((rd = s.Read(buf, 0, buf.Length)) > 0)
+                            {
+                                if (cancelled()) { r.Action = Action.Cancelled; return r; }
+                                o.Write(buf, 0, rd);
+                            }
+                        }
+                        if (existing != null && target == existing)
+                        {
+                            // Replace keeps the old file under a new name; nothing is deleted.
+                            string old = Tagged(existing, " (old)");
+                            for (int i = 2; File.Exists(old); i++) old = Tagged(existing, " (old " + i + ")");
+                            File.Move(existing, old);
+                            File.Move(tmp, target);
+                            r.Action = Action.Replaced; r.Note = "старият: " + Path.GetFileName(old) + "; " + r.Note;
+                        }
+                        else
+                        {
+                            File.Move(tmp, target);
+                            r.Action = existing != null ? Action.SavedBeside : Action.Restored;
+                            if (existing != null) r.Note = Path.GetFileName(target) + "; " + r.Note;
+                        }
+                        r.Target = target;
+                        done = true;
+                    }
+                    finally { if (!done && File.Exists(tmp)) File.Delete(tmp); }
+                }
+                if (r.Kind == "rar" || r.Kind == "7z") SevenZipTest(r, c.Note);
+            }
+            catch (IOException ex)
+            {
+                bool locked = (Marshal.GetHRForException(ex) & 0xFFFF) == 32 || (Marshal.GetHRForException(ex) & 0xFFFF) == 33;
+                r.Action = locked ? Action.Locked : Action.Error;
+                r.Note = (locked ? "отворен от друга програма; " : ex.Message + "; ") + r.Note;
+            }
+            catch (Exception ex) { r.Action = Action.Error; r.Note = ex.Message + "; " + r.Note; }
+            return r;
+        }
+
+        static string Tagged(string path, string tag)
+        {
+            return Path.Combine(Path.GetDirectoryName(path), Path.GetFileNameWithoutExtension(path) + tag + Path.GetExtension(path));
+        }
+
+        static bool SameContent(JassStream s, string other)
+        {
+            using (var o = new FileStream(other, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16))
+            {
+                if (o.Length != s.Length) return false;
+                s.Position = 0;
+                var a = new byte[1 << 16]; var b = new byte[1 << 16];
+                while (true)
+                {
+                    int n = Util.ReadFull(s, a, 0, a.Length);
+                    if (n == 0) return true;
+                    if (Util.ReadFull(o, b, 0, n) != n) return false;
+                    for (int i = 0; i < n; i++) if (a[i] != b[i]) return false;
+                }
+            }
+        }
+
+        static bool HasSpace(string path, long need)
+        {
+            try { return new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))).AvailableFreeSpace > need + 64L * 1024 * 1024; }
+            catch (ArgumentException) { return true; }
+        }
+
+        // The 7-Zip installer records its folder in the registry; a portable copy can be on PATH.
+        static string FindSevenZip()
+        {
+            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+                using (var k = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view).OpenSubKey(@"SOFTWARE\7-Zip"))
+                {
+                    var dir = k == null ? null : (k.GetValue("Path64") ?? k.GetValue("Path")) as string;
+                    if (dir != null && File.Exists(Path.Combine(dir, "7z.exe"))) return Path.Combine(dir, "7z.exe");
+                }
+            foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+            {
+                try { string p = Path.Combine(dir.Trim(), "7z.exe"); if (File.Exists(p)) return p; }
+                catch (ArgumentException) { }
+            }
+            return null;
+        }
+
+        static void SevenZipTest(Result r, string headerNote)
+        {
+            string seven = FindSevenZip();
+            if (seven == null) return;
+            var psi = new ProcessStartInfo(seven, "t \"" + r.Target + "\" -p-") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+            using (var pr = Process.Start(psi))
+            {
+                bool ok = pr.StandardOutput.ReadToEnd().Contains("Everything is Ok");
+                pr.WaitForExit();
+                r.Verdict = ok ? Verdict.OK : Verdict.CHECK;
+                r.Note = r.Note.Replace(headerNote, ok ? "7-Zip тест: всички CRC съвпадат" : "7-Zip тестът не мина");
+            }
+        }
+
+        // Not into the scanned folders: a stray .csv there is easily taken for a restored file.
+        public static string WriteReport(List<Result> rows)
+        {
+            string name = "jassdecryptor-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
+            var dirs = new[]
+            {
+                Path.GetDirectoryName(Application.ExecutablePath),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                Path.GetTempPath()
+            };
+            foreach (var d in dirs)
+            {
+                try
+                {
+                    string rd = Path.Combine(d, "JassDecryptor-reports");
+                    Directory.CreateDirectory(rd);
+                    string p = Path.Combine(rd, name);
+                    using (var w = new StreamWriter(p, false, new UTF8Encoding(true)))
+                    {
+                        w.WriteLine("source;target;size;kind;action;verdict;note");
+                        foreach (var r in rows)
+                            w.WriteLine(string.Join(";", new[] { Q(r.Source), Q(r.Target), r.Size.ToString(), r.Kind, r.Action.ToString(), r.Verdict.ToString(), Q(r.Note) }));
+                    }
+                    return p;
+                }
+                catch (Exception) { }
+            }
+            return null;
+        }
+
+        static string Q(string s) { return "\"" + (s ?? "").Replace("\"", "\"\"") + "\""; }
+
+        public static string ActionText(Action a)
+        {
+            switch (a)
+            {
+                case Action.Restored: return "Възстановен";
+                case Action.AlreadySame: return "Вече е наличен";
+                case Action.SavedBeside: return "Записан отделно";
+                case Action.Replaced: return "Заменен";
+                case Action.Skipped: return "Пропуснат";
+                case Action.Locked: return "Зает";
+                case Action.NoSpace: return "Няма място";
+                case Action.Cancelled: return "Спрян";
+                default: return "Грешка";
+            }
+        }
+    }
+
+    class MainForm : Form
+    {
+        readonly TextBox pathBox = new TextBox { ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right };
+        readonly Button folderBtn = new Button { Text = "Папка…" };
+        readonly Button fileBtn = new Button { Text = "Файл…" };
+        readonly Button startBtn = new Button { Text = "Възстанови", Enabled = false };
+        readonly Button stopBtn = new Button { Text = "Спри", Enabled = false };
+        readonly Button reportBtn = new Button { Text = "Отвори отчета", Enabled = false };
+        readonly CheckBox onlyProblems = new CheckBox { Text = "Само проблемните", AutoSize = true, Anchor = AnchorStyles.Left };
+        readonly ListView list = new ListView { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill };
+        readonly ProgressBar bar = new ProgressBar { Anchor = AnchorStyles.Left | AnchorStyles.Right };
+        readonly Label status = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+        readonly List<Result> results = new List<Result>();
+        readonly Queue<Result> pending = new Queue<Result>();
+        readonly System.Windows.Forms.Timer flush = new System.Windows.Forms.Timer { Interval = 250 };
+        List<string> files = new List<string>();
+        string root, reportPath;
+        volatile bool stop;
+        int doneCount;
+        Conflict? conflictForAll;
+
+        public MainForm()
+        {
+            Text = "Jass Decryptor   |   Copyright © 2026 Dimitar Grigorov";
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            Font = new Font("Segoe UI", 9f);
+            AutoScaleMode = AutoScaleMode.None;
+            float k;
+            using (var g = CreateGraphics()) k = g.DpiX / 96f;
+            Func<int, int> px = v => (int)(v * k);
+            Width = px(1000); Height = px(640); MinimumSize = new Size(px(700), px(400));
+            AllowDrop = true;
+
+            var info = new Label
+            {
+                Text = "Изберете или пуснете тук папка или файл. Всеки файл се възстановява до своя .jass, който не се променя.",
+                AutoSize = true, Margin = new Padding(3, 3, 3, px(6))
+            };
+            foreach (var b in new[] { folderBtn, fileBtn, startBtn, stopBtn, reportBtn })
+            {
+                b.AutoSize = true; b.MinimumSize = new Size(px(90), 0); b.Padding = new Padding(px(6), px(2), px(6), px(2));
+            }
+            var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, RowCount = 2, Padding = new Padding(px(8), px(8), px(8), 0) };
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 3; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            top.Controls.Add(info, 0, 0); top.SetColumnSpan(info, 4);
+            top.Controls.Add(pathBox, 0, 1); top.Controls.Add(folderBtn, 1, 1); top.Controls.Add(fileBtn, 2, 1); top.Controls.Add(startBtn, 3, 1);
+
+            list.Columns.Add("Файл", px(360)); list.Columns.Add("Размер", px(75), HorizontalAlignment.Right);
+            list.Columns.Add("Резултат", px(150)); list.Columns.Add("Проверка", px(85)); list.Columns.Add("Бележка", px(420));
+            var mid = new Panel { Dock = DockStyle.Fill, Padding = new Padding(px(8)) };
+            mid.Controls.Add(list);
+
+            var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 5, Padding = new Padding(px(8), 0, px(8), px(8)) };
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, px(200)));
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 3; i++) bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            bar.Height = px(18);
+            bottom.Controls.Add(bar, 0, 0); bottom.Controls.Add(status, 1, 0); bottom.Controls.Add(onlyProblems, 2, 0);
+            bottom.Controls.Add(stopBtn, 3, 0); bottom.Controls.Add(reportBtn, 4, 0);
+
+            Controls.Add(mid); Controls.Add(bottom); Controls.Add(top);
+
+            folderBtn.Click += delegate
+            {
+                using (var d = new FolderBrowserDialog { Description = "Папка с .jass файлове" })
+                    if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.SelectedPath);
+            };
+            fileBtn.Click += delegate
+            {
+                using (var d = new OpenFileDialog { Filter = ".jass файлове|*.jass*|Всички файлове|*.*" })
+                    if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.FileName);
+            };
+            startBtn.Click += delegate { Start(); };
+            stopBtn.Click += delegate { stop = true; stopBtn.Enabled = false; status.Text = "Спиране след текущия файл…"; };
+            reportBtn.Click += delegate { if (reportPath != null) Process.Start("explorer.exe", "/select,\"" + reportPath + "\""); };
+            onlyProblems.CheckedChanged += delegate { Refill(); };
+            DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) && !stopBtn.Enabled ? DragDropEffects.Copy : DragDropEffects.None; };
+            DragDrop += (s, e) => { var p = (string[])e.Data.GetData(DataFormats.FileDrop); if (p.Length > 0) SetRoot(p[0]); };
+            flush.Tick += delegate { Flush(); };
+            FormClosing += (s, e) =>
+            {
+                if (stopBtn.Enabled && MessageBox.Show(this, "Да спра ли?", Text, MessageBoxButtons.YesNo) == DialogResult.No) e.Cancel = true;
+                else stop = true;
+            };
+        }
+
+        public void SetRoot(string p)
+        {
+            root = p; pathBox.Text = p;
+            list.Items.Clear(); results.Clear(); reportPath = null; reportBtn.Enabled = false;
+            status.Text = "Търсене на .jass файлове…";
+            startBtn.Enabled = false;
+            var t = new Thread(() =>
+            {
+                var errors = new List<string>();
+                var f = Engine.Collect(p, errors);
+                long total = 0;
+                foreach (var x in f) try { total += new FileInfo(x).Length; } catch (Exception) { }
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    files = f;
+                    status.Text = f.Count + " .jass файла, " + Util.Size(total) + "; ключ: " + Keystream.Origin + (errors.Count > 0 ? "; недостъпни папки: " + errors.Count : "");
+                    startBtn.Enabled = f.Count > 0;
+                });
+            }) { IsBackground = true };
+            t.Start();
+        }
+
+        void Start()
+        {
+            int tested, passed;
+            status.Text = "Проверка на ключа…";
+            string bad = Engine.Preflight(files, out tested, out passed);
+            if (tested >= 3 && passed < tested * 0.8)
+            {
+                MessageBox.Show(this, "Ключът не пасва: верни са " + passed + " от " + tested + " проверени файла (напр. " + bad + ").\nНищо не е записано.",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                status.Text = "Спряно: ключът не пасва (" + passed + "/" + tested + ")";
+                return;
+            }
+            // Small sets are checked file by file anyway.
+            if (tested < 3 && files.Count > 20 && MessageBox.Show(this, "Ключът не може да се провери предварително: малко файлове с познат формат.\nДа продължа ли?",
+                    Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+
+            stop = false; doneCount = 0; conflictForAll = null;
+            results.Clear(); list.Items.Clear();
+            bar.Maximum = files.Count; bar.Value = 0;
+            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = false; stopBtn.Enabled = true; reportBtn.Enabled = false;
+            flush.Start();
+            var work = new List<string>(files);
+            var t = new Thread(() =>
+            {
+                foreach (var f in work)
+                {
+                    if (stop) break;
+                    var r = Engine.ProcessOne(f, AskOnUiThread, () => stop);
+                    lock (pending) pending.Enqueue(r);
+                    Interlocked.Increment(ref doneCount);
+                }
+                BeginInvoke((MethodInvoker)Finish);
+            }) { IsBackground = true };
+            t.Start();
+        }
+
+        Conflict AskOnUiThread(Result r, string existing)
+        {
+            if (conflictForAll.HasValue) return conflictForAll.Value;
+            return (Conflict)Invoke((Func<Conflict>)delegate { return AskConflictDialog(r, existing); });
+        }
+
+        Conflict AskConflictDialog(Result r, string existing)
+        {
+            float k;
+            using (var g = CreateGraphics()) k = g.DpiX / 96f;
+            Func<int, int> px = v => (int)(v * k);
+            var fi = new FileInfo(existing);
+            string name = fi.Name, stem = Path.GetFileNameWithoutExtension(name), ext = Path.GetExtension(name);
+            Func<long, string> size = n => Util.Size(n) + " (" + n.ToString("N0") + " байта)";
+
+            var d = new Form
+            {
+                Text = "Файлът вече съществува", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, Font = Font, AutoScaleMode = AutoScaleMode.None,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(px(14))
+            };
+            var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 2 };
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            Func<string, Label> text = s => new Label { Text = s, AutoSize = true, MaximumSize = new Size(px(460), 0), Anchor = AnchorStyles.Left, Margin = new Padding(px(3)) };
+            Action<Control, int> wide = (ctl, top) => { ctl.Margin = new Padding(px(3), px(top), px(3), px(3)); t.Controls.Add(ctl); t.SetColumnSpan(ctl, 2); };
+
+            var head = text("„" + name + "“ вече съществува и е различен.");
+            head.Font = new Font(Font, FontStyle.Bold); head.MaximumSize = new Size(px(520), 0);
+            wide(head, 0);
+            var folder = text(fi.DirectoryName); folder.ForeColor = SystemColors.GrayText; folder.MaximumSize = new Size(px(520), 0);
+            wide(folder, 0);
+            t.Controls.Add(text("Съществуващ:")); t.Controls.Add(text(size(fi.Length) + ", " + fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm")));
+            t.Controls.Add(text("Възстановен:")); t.Controls.Add(text(size(r.Size)));
+            t.Controls[t.Controls.Count - 1].Margin = new Padding(px(3), px(3), px(3), px(12));
+
+            var b1 = new Button { Text = "Запази и двата", DialogResult = DialogResult.Yes };
+            var b2 = new Button { Text = "Замени", DialogResult = DialogResult.No };
+            var b3 = new Button { Text = "Пропусни", DialogResult = DialogResult.Ignore };
+            var what = new[]
+            {
+                "Новият се записва като „" + stem + " (recovered)" + ext + "“.",
+                "Старият се преименува на „" + stem + " (old)" + ext + "“.",
+                "Нищо не се записва."
+            };
+            var bs = new[] { b1, b2, b3 };
+            for (int i = 0; i < 3; i++)
+            {
+                bs[i].AutoSize = true; bs[i].MinimumSize = new Size(px(120), px(28)); bs[i].Anchor = AnchorStyles.Left | AnchorStyles.Right;
+                t.Controls.Add(bs[i]); t.Controls.Add(text(what[i]));
+            }
+            var all = new CheckBox { Text = "Същото за всички следващи", AutoSize = true };
+            wide(all, 12);
+
+            d.Controls.Add(t);
+            d.AcceptButton = b1; d.CancelButton = b3;
+            var res = d.ShowDialog(this);
+            Conflict c = res == DialogResult.No ? Conflict.Replace : res == DialogResult.Ignore ? Conflict.Skip : Conflict.Beside;
+            if (res == DialogResult.Cancel) c = Conflict.Skip;
+            if (all.Checked) conflictForAll = c;
+            return c;
+        }
+
+        void Flush()
+        {
+            var batch = new List<Result>();
+            lock (pending) while (pending.Count > 0) batch.Add(pending.Dequeue());
+            if (batch.Count > 0)
+            {
+                list.BeginUpdate();
+                foreach (var r in batch) { results.Add(r); if (Show(r)) list.Items.Add(Item(r)); }
+                list.EndUpdate();
+                if (list.Items.Count > 0) list.EnsureVisible(list.Items.Count - 1);
+            }
+            bar.Value = Math.Min(bar.Maximum, doneCount);
+            status.Text = "Обработени " + doneCount + " от " + files.Count;
+        }
+
+        bool Show(Result r)
+        {
+            return !onlyProblems.Checked || !((r.Action == Action.Restored || r.Action == Action.AlreadySame) && r.Verdict == Verdict.OK);
+        }
+
+        ListViewItem Item(Result r)
+        {
+            string rel = r.Source;
+            if (!Directory.Exists(root)) rel = Path.GetFileName(rel);
+            else if (rel.StartsWith(root, StringComparison.OrdinalIgnoreCase)) rel = rel.Substring(root.Length).TrimStart('\\');
+            var it = new ListViewItem(new[] { rel, Util.Size(r.Size), Engine.ActionText(r.Action), r.Verdict.ToString(), r.Note });
+            if (r.IsProblem) it.BackColor = Color.FromArgb(255, 220, 220);
+            else if (r.Verdict == Verdict.UNVERIFIED || r.Action == Action.SavedBeside || r.Action == Action.Replaced || r.Action == Action.Skipped) it.BackColor = Color.FromArgb(255, 245, 200);
+            else if (r.Action == Action.AlreadySame) it.ForeColor = Color.Gray;
+            return it;
+        }
+
+        void Refill()
+        {
+            list.BeginUpdate(); list.Items.Clear();
+            foreach (var r in results) if (Show(r)) list.Items.Add(Item(r));
+            list.EndUpdate();
+        }
+
+        void Finish()
+        {
+            flush.Stop(); Flush();
+            reportPath = Engine.WriteReport(results);
+            reportBtn.Enabled = reportPath != null;
+            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = true; stopBtn.Enabled = false;
+            var cnt = new Dictionary<string, int>();
+            int problems = 0;
+            foreach (var r in results)
+            {
+                string k = Engine.ActionText(r.Action);
+                cnt[k] = (cnt.ContainsKey(k) ? cnt[k] : 0) + 1;
+                if (r.IsProblem) problems++;
+            }
+            var sb = new StringBuilder();
+            foreach (var kv in cnt) sb.AppendLine(kv.Key + ": " + kv.Value);
+            sb.AppendLine("За проверка: " + problems);
+            if (reportPath != null) sb.AppendLine().AppendLine("Отчет: " + reportPath);
+            status.Text = (stop ? "Спряно: " : "Готово: ") + results.Count + " файла, за проверка " + problems;
+            MessageBox.Show(this, sb.ToString(), stop ? "Спряно" : "Готово", MessageBoxButtons.OK, problems > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+    }
+
+    static class Program
+    {
+        [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+        [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+
+        [STAThread]
+        static int Main(string[] args)
+        {
+            bool cli = args.Length >= 2 && args[0].Equals("/cli", StringComparison.OrdinalIgnoreCase);
+            if (cli) AttachConsole(-1);
+            string keyError = KeystreamError();
+            if (keyError != null)
+            {
+                if (cli) Console.WriteLine(keyError);
+                else MessageBox.Show(keyError, "Jass Decryptor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 3;
+            }
+            if (cli) return Cli(args);
+            if (Environment.OSVersion.Version.Major >= 6) SetProcessDPIAware();
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            var f = new MainForm();
+            // A file or folder dropped onto JassDecryptor.exe arrives as the first argument.
+            if (args.Length == 1) f.Shown += delegate { f.SetRoot(args[0]); };
+            Application.Run(f);
+            return 0;
+        }
+
+        static string KeystreamError()
+        {
+            try { return Keystream.K.Length == Keystream.N ? null : "?"; }
+            catch (TypeInitializationException ex) { return (ex.InnerException ?? ex).Message; }
+        }
+
+        // JassDecryptor.exe /cli <file or folder> [/conflict:beside|replace|skip] [/force]
+        // Exit code: 0 clean, 1 some files need a look, 2 the key does not fit, 3 the key cannot be loaded.
+        static int Cli(string[] args)
+        {
+            Conflict conflict = Conflict.Beside;
+            bool force = false;
+            for (int i = 2; i < args.Length; i++)
+            {
+                if (args[i].StartsWith("/conflict:", StringComparison.OrdinalIgnoreCase))
+                    conflict = (Conflict)Enum.Parse(typeof(Conflict), args[i].Substring(10), true);
+                else if (args[i].Equals("/force", StringComparison.OrdinalIgnoreCase)) force = true;
+            }
+            var errors = new List<string>();
+            var files = Engine.Collect(args[1], errors);
+            int tested, passed;
+            string bad = Engine.Preflight(files, out tested, out passed);
+            Console.WriteLine();
+            Console.WriteLine("files " + files.Count + ", key " + Keystream.Origin + ", key check " + passed + "/" + tested);
+            if (tested >= 3 && passed < tested * 0.8 && !force) { Console.WriteLine("key does not fit: " + bad); return 2; }
+            var rows = new List<Result>();
+            int problems = 0;
+            foreach (var f in files)
+            {
+                var r = Engine.ProcessOne(f, delegate { return conflict; }, () => false);
+                rows.Add(r);
+                if (r.IsProblem) problems++;
+            }
+            var cnt = new SortedDictionary<string, int>();
+            foreach (var r in rows) { string k = r.Action + "/" + r.Verdict; cnt[k] = (cnt.ContainsKey(k) ? cnt[k] : 0) + 1; }
+            foreach (var kv in cnt) Console.WriteLine(kv.Key + " " + kv.Value);
+            Console.WriteLine("report " + Engine.WriteReport(rows));
+            return problems > 0 ? 1 : 0;
+        }
+    }
+}

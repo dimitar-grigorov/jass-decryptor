@@ -1,0 +1,12 @@
+# Build output: publish JassDecryptor.exe as a GitHub release, not in the tree.
+*.exe
+*.pdb
+JassDecryptor-reports/
+
+# Never commit victim data.
+*.jass
+!samples/*.jass
+*.bak
+*.mdf
+*.ldf
+*.csv
