@@ -1,98 +1,107 @@
 # Jass Decryptor
 
-Free decryptor for the **`.jass` ransomware**: files renamed to `<name>.jass`, a ransom note `LOCKED.txt`, a Tor chat with a "personal ID" and an offer to "decrypt two files for free" for about 400 EUR.
+**Files encrypted by the `.jass` ransomware? You can get them back for free.**
 
-The encryption turned out to be weak. The first 20000 bytes of every file are XOR-ed with one fixed keystream. The rest of the file is left as it was. There is no per-file key, no appended footer and no change in size. With the keystream, every file comes back byte for byte.
+## ⬇ [Download JassDecryptor.exe](https://github.com/dimitar-grigorov/jass-decryptor/releases/latest/download/JassDecryptor.exe)
 
-> **The keystream in this repository is proven for one victim.** It is not known whether the attackers reuse it. If your files use another one, the tool notices and writes nothing; see [Another victim, another key](#another-victim-another-key).
+One file, nothing to install, Windows 8 or later. The SHA-256 checksum and older versions are on the [releases page](https://github.com/dimitar-grigorov/jass-decryptor/releases/latest).
 
-## Quick start (Windows)
+## Is this your ransomware?
 
-1. Download `JassDecryptor.exe` from the Releases page. Nothing to install; it needs .NET Framework 4, which every Windows since 8 ships with.
-2. Run it, choose a folder or a single file, or drop either onto the window, and press **Възстанови** (Restore). The interface is in Bulgarian.
-3. Every `<name>.jass` is restored next to itself as `<name>`. The `.jass` files are only read, never changed.
+- Your files have a new extension: `report.pdf` became `report.pdf.jass`.
+- A note named `LOCKED.txt` appeared:
 
-If a file with the target name already exists:
+```
+YOUR COMPUTER WAS HACKED
+ALL OF YOUR FILES ARE ENCRYPTED WITH UNIQUE AND VERY STRONG PASSWORD
 
-| Existing file | What happens |
-|---|---|
-| identical to the restored content | nothing is written ("already there") |
-| different | the tool shows both sizes and asks: **keep both** (writes `<name> (recovered).<ext>`), **replace** (the old file is renamed to `<name> (old).<ext>`, never deleted) or **skip** |
+Download and install Tor browser and navigate to http://slkbkfxzsh43wgmnm4t6gtiewrzojxoo2xmu4vdpsu2cdfzgyq76saqd.onion/
 
-Before it writes anything, the tool decrypts the head of a sample of files with clear signatures (ZIP, PDF, PNG, XML, Office, SQL Server, ...). If they do not decrypt to their signature, it stops: the key does not fit. After each file it checks the format: ZIP/Office/ODF CRC32 of the entries in the decrypted zone, PNG chunk CRCs, XML well-formedness, a 7-Zip test for RAR/7z when 7-Zip is installed (found through its registry entry or PATH; without it those archives are restored but marked unverified), and headers for the rest. A CSV report is written to `JassDecryptor-reports` next to the exe.
+we will decrypt two files for free
+price for the decryption tool and the password usually is around 400eur
+```
 
-Command line: `JassDecryptor.exe /cli <folder or file> [/conflict:beside|replace|skip] [/force]`. Exit code 0 = clean, 1 = some files need a look, 2 = the key does not fit, 3 = the key cannot be loaded.
+- Their Tor chat asks for a "personal ID" and offers to decrypt two files as proof.
 
-## Repository
+If this matches, try the tool before you pay anything.
+
+## The "very strong password" isn't
+
+Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: a SQL Server database, an 11 MB ZIP and a 43 MB RAR with 5688 files all pass their own checksums. A whole company's files, database included, were back the same day. Nobody paid.
+
+## How to use it
+
+1. Download `JassDecryptor.exe` and run it. The interface is in Bulgarian.
+2. Choose a folder or a single file (or drop it onto the window) and press **Възстанови** (Restore).
+3. Every `name.jass` is restored next to itself as `name`. The `.jass` files are not changed.
+
+If a file with that name already exists:
+- **same content**: it is left alone;
+- **different**: you see both sizes and choose **keep both** (saved as `name (recovered)`), **replace** (the old one becomes `name (old)`, nothing is deleted) or **skip**.
+
+Before writing anything, the tool tests the key on a few of your files. If your files were encrypted with a different key, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe.
+
+## After the recovery
+
+- Keep the `.jass` files until you have opened the important restored ones.
+- Change every password and close remote access (RDP, AnyDesk and the like). That is most likely how they got in.
+- Reinstall the machine if you can. Do not run "decryptors" from unknown sources.
+
+## Different key?
+
+You need one file that you have both as an exact original and encrypted: an installer, a PDF from an e-mail, a template. Ideally 20000 bytes or larger.
+
+```
+python python/derive_keystream.py jass_keystream_20000.bin <original> <original>.jass
+```
+
+Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; the window then shows that key instead of "вграден" (built-in). An older version of a file is not an original: wherever its content changed, the key comes out wrong.
+
+Stuck? Open an issue, with one non-sensitive original/encrypted pair if you can share it.
+
+---
+
+## For the technically curious
+
+### How we cracked it
+
+A small company woke up to `*.jass` files. The one thing that mattered was a SQL Server 2008 R2 database, and its only backup was an encrypted ZIP.
+
+1. **The tail was intact.** The ZIP's central directory at the end of the file was readable, and the archive was exactly its original size. So only the head was encrypted and nothing was appended: no key, no file ID.
+2. **Same pattern everywhere.** A few application files existed both plain (older copies) and encrypted. XOR of each pair was non-zero up to offset 19999 and zero after it, and the pattern was the same for different files. One keystream, 20000 bytes, from offset 0.
+3. **The trap.** The first key came from a 1.2 MB Access database and was wrong in 6 bytes: the "plain" copy was an older version. The ZIP failed its CRC.
+4. **The fix.** Majority voting over many encrypted text files and decompressing the ZIP's deflate stream pinned down those 6 bytes. The ZIP entry, 60 MB unpacked from data spanning offsets 43 to 19999, now matches its CRC32. The RAR passes `7z t`, and the restored database passes `DBCC CHECKDB WITH DATA_PURITY`.
+5. **Result.** 782 files restored; all pass their format check except one whose original was 1241 zero bytes.
+
+Lessons: an "original" must be the exact same version, so compare the bytes after the encrypted zone first. Prove a key on something with checksums, not on how the output looks.
+
+### What the tool checks
+
+- **Before:** decrypts the head of sample files with known signatures (ZIP, PDF, PNG, XML, Office, SQL Server backups). Wrong key, no writes.
+- **After each file:** CRC32 of ZIP/Office/ODF entries inside the decrypted zone, PNG chunk CRCs, XML parsing, a `7z t` for RAR/7z when 7-Zip is installed (found via registry or PATH; optional), header checks for the rest.
+- Writes to a temporary file and renames it, so an interrupted run never leaves a half-written file under the real name. Memory use stays flat on large files.
+
+Command line: `JassDecryptor.exe /cli <folder or file> [/conflict:beside|replace|skip] [/force]`. Exit codes: 0 clean, 1 some files need a look, 2 the key does not fit, 3 the key cannot be loaded.
+
+### Source
 
 | Path | What |
 |---|---|
-| `csharp/` | `JassDecryptor.cs`, a single-file WinForms app (C# 5). `build.cmd` compiles it with the `csc.exe` that ships with .NET Framework 4. |
-| `python/jass_decryptor.py` | Reference implementation; output is byte-identical to the C# tool. `python jass_decryptor.py <file or folder> <output folder>` |
-| `python/derive_keystream.py` | Rebuilds a keystream from original/encrypted pairs. |
-| `python/selftest.py` | Round-trip test: makes sample files, encrypts them with the keystream and checks that both tools restore them byte for byte. |
-| `.github/workflows/build.yml` | Builds the exe and runs the round-trip test on every push; a `v*` tag publishes `JassDecryptor.exe` and its SHA-256 as a release. |
-| `keystream/jass_keystream_20000.bin` | The keystream, SHA-256 `ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d`. |
-| `samples/zero-filled.config.jass` | A genuine encrypted file whose original was 1241 zero bytes, so its content is the first 1241 bytes of the keystream. It holds no victim data. |
+| `csharp/` | The app: one C# file. `build.cmd` compiles it with the `csc.exe` that ships with Windows (.NET Framework 4), no Visual Studio needed. |
+| `python/` | `jass_decryptor.py` (same output as the app, byte for byte), `derive_keystream.py`, `selftest.py`. |
+| `keystream/jass_keystream_20000.bin` | The key. SHA-256 `ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d` |
+| `samples/zero-filled.config.jass` | A real encrypted file whose original was all zeros, so it holds the first 1241 bytes of the key and no data. |
 
-## Another victim, another key
+### Indicators
 
-1. Find one file whose original you still have, byte for byte the same version: a program file, a PDF from an e-mail, a template, a backup. **Original of 20000 bytes or more** gives the whole key at once; smaller ones only give their own length.
-2. `python python/derive_keystream.py jass_keystream_20000.bin <original> <original>.jass`
-3. Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`. The window then shows "ключ: jass_keystream_20000.bin" instead of "вграден" (embedded).
-4. Test on a copy of a ZIP, DOCX/XLSX or PNG first: their checksums prove the key.
-
-An older copy of a file is not an original: wherever its content changed, the derived key is wrong. That is exactly the trap described in the case study below.
-
-If this does not work for you, open an issue. Attach one non-sensitive original/encrypted pair if you can. Do not upload anything confidential.
-
-## Case study
-
-**The incident.** A small company found its files renamed to `*.jass` and a `LOCKED.txt` note. The most important file was a SQL Server 2008 R2 database: its backup existed only as an encrypted ZIP. The owner asked for that one file; everything else could be reinstalled.
-
-**1. What the files say.** The end of the encrypted ZIP (its central directory) was readable, and once decrypted the archive validated at exactly its encrypted size. So only the head was touched and nothing was appended: no key or file ID is stored in the files.
-
-**2. Plain copies.** Some application files existed both encrypted and unencrypted (older copies). XOR of a plain/encrypted pair was non-zero up to offset 19999 and zero after it, as long as the two versions did not differ. The XOR pattern was the same for different files. Conclusion: one keystream, 20000 bytes, applied from offset 0 of every file.
-
-**3. The trap.** The first keystream came from the largest pair, a 1.2 MB Access database. It was wrong in 6 positions: the "plain" copy was an older version, and those 6 bytes had changed in the meantime. The decrypted ZIP failed its CRC.
-
-**4. Proof.** The 6 positions were found by voting across many encrypted text files and by decompressing the ZIP's deflate stream. The final keystream is proven exact on all 20000 positions:
-- the 11 MB ZIP decrypts and passes `zipfile.testzip()`: CRC32 of a 60 MB entry whose compressed data spans offsets 43 to 19999;
-- a 43 MB RAR archive decrypts and passes `7z t` (5688 files);
-- the database restores, and `DBCC CHECKDB WITH DATA_PURITY` reports no errors.
-
-**5. Recovery.** 782 files were restored; all pass their format check except one whose original was all zeros. The database was back online the same day.
-
-**Lessons.**
-- Ransomware that encrypts only the head with a reused XOR keystream can be undone completely from one good original/encrypted pair.
-- An "original" must be the exact same version. Check that the bytes after the encrypted zone are identical.
-- Prove the key on something with checksums (ZIP, PNG, RAR, database pages), not on how the output "looks".
-
-## Indicators
-
-- Extension: `.jass` appended to the full file name (`report.pdf` becomes `report.pdf.jass`).
-- Ransom note `LOCKED.txt`:
-  ```
-  YOUR COMPUTER WAS HACKED
-  ALL OF YOUR FILES ARE ENCRYPTED WITH UNIQUE AND VERY STRONG PASSWORD
-  Download and install Tor browser and navigate to http://slkbkfxzsh43wgmnm4t6gtiewrzojxoo2xmu4vdpsu2cdfzgyq76saqd.onion/
-  we will decrypt two files for free
-  price for the decryption tool and the password usually is around 400eur
-  ```
-- Encryption: XOR of bytes 0 to 19999 with a fixed keystream; file size unchanged; no marker or footer.
-- Sample believed to be the encryptor, taken from the antivirus quarantine of the hit machine (not run, not analysed here):
+- Encryption: XOR of bytes 0 to 19999 with a fixed keystream; size unchanged; no marker or footer.
+- Sample believed to be the encryptor, from the antivirus quarantine of the hit machine (not run, not analysed yet):
   - `laweFc.exe`, 704512 bytes
   - SHA-256 `114def510f10ad21fd43534d635f518d0ed55ff0faf32e3297ba173d3ebb665d`
   - SHA-1 `7d664560b7d11d2c0d36b0ed40aafb55f47224bc`
   - MD5 `74bef176a795d8b39dfc32e4022a01c1`
-  - VirusTotal (submitted inside `laweFc.zip`, SHA-256 `8aa92d6342d5d2b9010e719ec8f90e66a8c381bceca92bca15284b88d6a42a49`): <https://www.virustotal.com/gui/file/8aa92d6342d5d2b9010e719ec8f90e66a8c381bceca92bca15284b88d6a42a49>
-- Family: not identified. In October 2026 No More Ransom listed no decryptor for `.jass`, and web searches found none. Builder kits such as Xorist let the operator choose the extension, note name and an XOR mode; that this is one of them is a guess, not a finding. The binary has not been analysed yet.
-
-## Safety
-
-- Work on copies when you can. The tool never changes `.jass` files, but disks of a hit machine deserve care.
-- Do not pay before you have tried this; do not run "decryptors" from unknown sources.
-- Change all passwords and close remote access (RDP) on the hit machine; the attackers most likely got in that way or a similar one.
+  - [VirusTotal](https://www.virustotal.com/gui/file/8aa92d6342d5d2b9010e719ec8f90e66a8c381bceca92bca15284b88d6a42a49) (submitted as `laweFc.zip`, SHA-256 `8aa92d6342d5d2b9010e719ec8f90e66a8c381bceca92bca15284b88d6a42a49`)
+- Family: unknown. In October 2026 No More Ransom had no decryptor for `.jass`. Kits like Xorist let the operator pick the extension, the note and an XOR mode, so this may be one of them; that is a guess.
 
 ## License
 
