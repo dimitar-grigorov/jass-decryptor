@@ -699,9 +699,79 @@ namespace JassDecryptor
         }
     }
 
+    // Vista+ folder picker; FolderBrowserDialog in .NET Framework is the old tree view.
+    static class FolderPicker
+    {
+        [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")] class FileOpenDialogCo { }
+
+        [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IFileDialog
+        {
+            [PreserveSig] int Show(IntPtr parent);
+            void SetFileTypes(uint n, IntPtr specs);
+            void SetFileTypeIndex(uint i);
+            void GetFileTypeIndex(out uint i);
+            void Advise(IntPtr sink, out uint cookie);
+            void Unadvise(uint cookie);
+            void SetOptions(uint fos);
+            void GetOptions(out uint fos);
+            void SetDefaultFolder(IShellItem si);
+            void SetFolder(IShellItem si);
+            void GetFolder(out IShellItem si);
+            void GetCurrentSelection(out IShellItem si);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+            void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+            void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+            void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+            void GetResult(out IShellItem si);
+        }
+
+        [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IShellItem
+        {
+            void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+            void GetParent(out IShellItem si);
+            void GetDisplayName(uint sigdn, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IShellItem si);
+
+        // Null on cancel; the old dialog on XP.
+        public static string Pick(IWin32Window owner, string title, string start)
+        {
+            IFileDialog d;
+            try { d = (IFileDialog)new FileOpenDialogCo(); }
+            catch (Exception)
+            {
+                using (var f = new FolderBrowserDialog { Description = title, SelectedPath = start ?? "" })
+                    return f.ShowDialog(owner) == DialogResult.OK ? f.SelectedPath : null;
+            }
+            try
+            {
+                d.SetOptions(0x20 | 0x40 | 0x800);   // FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
+                d.SetTitle(title);
+                if (start != null && Directory.Exists(start))
+                    try { IShellItem si; SHCreateItemFromParsingName(start, IntPtr.Zero, typeof(IShellItem).GUID, out si); d.SetFolder(si); }
+                    catch (Exception) { }
+                if (d.Show(owner.Handle) != 0) return null;
+                IShellItem r; string path;
+                d.GetResult(out r);
+                r.GetDisplayName(0x80058000, out path);   // SIGDN_FILESYSPATH
+                return path;
+            }
+            finally { Marshal.ReleaseComObject(d); }
+        }
+    }
+
     class MainForm : Form
     {
-        readonly TextBox pathBox = new TextBox { ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right };
+        readonly TextBox pathBox = new TextBox
+        {
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
+            AutoCompleteMode = AutoCompleteMode.SuggestAppend, AutoCompleteSource = AutoCompleteSource.FileSystem
+        };
         readonly Button folderBtn = new Button { Text = "Folder…" };
         readonly Button fileBtn = new Button { Text = "File…" };
         readonly Button startBtn = new Button { Text = "Restore", Enabled = false };
@@ -717,7 +787,8 @@ namespace JassDecryptor
         List<string> files = new List<string>();
         string root, reportPath;
         volatile bool stop;
-        int doneCount;
+        int doneCount, scanGen;
+        bool running;
         Conflict? conflictForAll;
 
         public MainForm()
@@ -734,13 +805,15 @@ namespace JassDecryptor
 
             var info = new Label
             {
-                Text = "Choose or drop a folder or a file here. Each file is restored next to its .jass, which stays unchanged.",
+                Text = "Choose, type or drop a folder or a file here. Each file is restored next to its .jass, which stays unchanged.",
                 AutoSize = true, Margin = new Padding(3, 3, 3, px(6))
             };
             foreach (var b in new[] { folderBtn, fileBtn, startBtn, stopBtn, reportBtn })
             {
                 b.AutoSize = true; b.MinimumSize = new Size(px(90), 0); b.Padding = new Padding(px(6), px(2), px(6), px(2));
             }
+            startBtn.Font = new Font(Font, FontStyle.Bold);
+            AcceptButton = startBtn;
             var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, RowCount = 2, Padding = new Padding(px(8), px(8), px(8), 0) };
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             for (int i = 0; i < 3; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -764,14 +837,21 @@ namespace JassDecryptor
 
             folderBtn.Click += delegate
             {
-                using (var d = new FolderBrowserDialog { Description = "Folder with .jass files" })
-                    if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.SelectedPath);
+                Cursor.Current = Cursors.WaitCursor;   // the shell dialog takes a second or two to appear
+                string p = FolderPicker.Pick(this, "Folder with .jass files", StartFolder());
+                if (p != null) SetRoot(p);
             };
             fileBtn.Click += delegate
             {
-                using (var d = new OpenFileDialog { Filter = ".jass files|*.jass*|All files|*.*" })
+                Cursor.Current = Cursors.WaitCursor;
+                using (var d = new OpenFileDialog { Filter = ".jass files|*.jass*|All files|*.*", InitialDirectory = StartFolder() ?? "" })
                     if (d.ShowDialog(this) == DialogResult.OK) SetRoot(d.FileName);
             };
+            pathBox.TextChanged += delegate { PathEdited(); };
+            // Enter applies the typed path instead of pressing AcceptButton.
+            pathBox.PreviewKeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) e.IsInputKey = true; };
+            pathBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ApplyTyped(); } };
+            pathBox.Leave += delegate { ApplyTyped(); };
             startBtn.Click += delegate { Start(); };
             stopBtn.Click += delegate { stop = true; stopBtn.Enabled = false; status.Text = "Stopping after the current file…"; };
             reportBtn.Click += delegate { if (reportPath != null) Process.Start("explorer.exe", "/select,\"" + reportPath + "\""); };
@@ -786,12 +866,43 @@ namespace JassDecryptor
             };
         }
 
+        string StartFolder()
+        {
+            string p = pathBox.Text.Trim();
+            if (File.Exists(p)) p = Path.GetDirectoryName(p);
+            return Directory.Exists(p) ? p : null;
+        }
+
+        bool IsCurrent(string p)
+        {
+            return root != null && string.Equals(p.Trim().TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        void PathEdited()
+        {
+            if (running) return;
+            string p = pathBox.Text.Trim();
+            bool exists = File.Exists(p) || Directory.Exists(p);
+            pathBox.BackColor = exists || p.Length == 0 ? SystemColors.Window : Color.FromArgb(255, 220, 220);
+            if (IsCurrent(p)) return;
+            startBtn.Enabled = false;
+            status.Text = p.Length == 0 ? "" : exists ? "Press Enter to look for .jass files there." : "Path not found.";
+        }
+
+        void ApplyTyped()
+        {
+            string p = pathBox.Text.Trim();
+            if (!running && !IsCurrent(p) && (File.Exists(p) || Directory.Exists(p))) SetRoot(p);
+        }
+
         public void SetRoot(string p)
         {
             root = p; pathBox.Text = p;
             list.Items.Clear(); results.Clear(); reportPath = null; reportBtn.Enabled = false;
             status.Text = "Looking for .jass files…";
             startBtn.Enabled = false;
+            Cursor = Cursors.AppStarting;
+            int gen = ++scanGen;
             var t = new Thread(() =>
             {
                 var errors = new List<string>();
@@ -800,9 +911,13 @@ namespace JassDecryptor
                 foreach (var x in f) try { total += new FileInfo(x).Length; } catch (Exception) { }
                 BeginInvoke((MethodInvoker)delegate
                 {
+                    if (gen != scanGen) return;   // a newer path was chosen meanwhile
+                    Cursor = Cursors.Default;
                     files = f;
-                    status.Text = f.Count + " .jass files, " + Util.Size(total) + "; key: " + Keystream.Origin + (errors.Count > 0 ? "; folders without access: " + errors.Count : "");
-                    startBtn.Enabled = f.Count > 0;
+                    status.Text = f.Count + " .jass files, " + Util.Size(total) + "; key: " + Keystream.Origin + (errors.Count > 0 ? "; folders without access: " + errors.Count : "") +
+                        (f.Count > 0 ? ". Press Restore to start." : "");
+                    startBtn.Enabled = f.Count > 0 && IsCurrent(pathBox.Text);
+                    if (startBtn.Enabled && !pathBox.Focused) startBtn.Focus();
                 });
             }) { IsBackground = true };
             t.Start();
@@ -812,6 +927,8 @@ namespace JassDecryptor
         {
             int tested, passed;
             status.Text = "Checking the key…";
+            status.Update();
+            Cursor.Current = Cursors.WaitCursor;
             string bad = Engine.Preflight(files, out tested, out passed);
             if (tested >= 3 && passed < tested * 0.8)
             {
@@ -828,6 +945,7 @@ namespace JassDecryptor
             stop = false; doneCount = 0; conflictForAll = null;
             results.Clear(); list.Items.Clear();
             bar.Maximum = files.Count; bar.Value = 0;
+            running = true; pathBox.ReadOnly = true;
             startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = false; stopBtn.Enabled = true; reportBtn.Enabled = false;
             flush.Start();
             var work = new List<string>(files);
@@ -951,6 +1069,7 @@ namespace JassDecryptor
             flush.Stop(); Flush();
             reportPath = Engine.WriteReport(results);
             reportBtn.Enabled = reportPath != null;
+            running = false; pathBox.ReadOnly = false;
             startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = true; stopBtn.Enabled = false;
             var cnt = new Dictionary<string, int>();
             int problems = 0;
