@@ -55,13 +55,19 @@ Before writing anything, the tool tests its keys on a few of your files. If none
 
 ## Different key?
 
-You need one file that you have both as an exact original and encrypted: an installer, a PDF from an e-mail, a template. Ideally 20000 bytes or larger.
+You need one file that you have both as an exact original and encrypted: an installer, a PDF from an e-mail, a template, or a file that was open while the ransomware ran (it often leaves `name` next to `name.jass`). Ideally 20000 bytes or larger; smaller pairs can be combined.
+
+Press **Key from pair…**, pick the two files and press **Make key**. The key is saved as `jass_keystream_20000.bin` next to the exe and used from then on, together with the built-in ones.
+
+<p align="center"><img src="screenshots/key-from-pair.png" width="560" alt="Key from a file pair dialog"></p>
+
+The same from a script:
 
 ```
 python python/derive_keystream.py jass_keystream_20000.bin <original> <original>.jass
 ```
 
-Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; it is tried along with the built-in keys. An older version of a file is not an original: wherever its content changed, the key comes out wrong.
+An older version of a file is not an original: wherever its content changed, the key comes out wrong.
 
 Stuck? Open an issue, with one non-sensitive original/encrypted pair if you can share it.
 

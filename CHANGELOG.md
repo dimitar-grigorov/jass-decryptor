@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0 (2026-10-19)
+
+- **Key from pair…** makes the key for a new machine from one file you have both as the original and encrypted; smaller pairs can be combined. The key is saved next to the exe and used from then on.
+- New screenshots.
+
 ## 1.2.0 (2026-10-18)
 
 - The key differs between infected machines. A second key is built in, and every file gets the key that fits it, so one folder may hold files from different machines.

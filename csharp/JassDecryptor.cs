@@ -22,7 +22,7 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyProduct("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026 Dimitar Grigorov")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 
 namespace JassDecryptor
 {
@@ -65,6 +65,45 @@ namespace JassDecryptor
                     keys.Add(new Key { Name = b[2], K = k });
                 }
             return keys;
+        }
+
+        // Adds original XOR encrypted to a key being built; returns an error or null.
+        public static string AddPair(string orig, string enc, byte[] key, bool[] known)
+        {
+            using (var a = new FileStream(orig, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var b = new FileStream(enc, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                if (a.Length != b.Length) return "The sizes differ, so these are not the same version of the file.";
+                if (a.Length == 0) return "The file is empty.";
+                int n = (int)Math.Min(a.Length, N);
+                var ha = new byte[n]; var hb = new byte[n];
+                Util.ReadFull(a, ha, 0, n); Util.ReadFull(b, hb, 0, n);
+                var ta = new byte[1 << 16]; var tb = new byte[1 << 16];
+                int r;
+                while ((r = Util.ReadFull(a, ta, 0, ta.Length)) > 0)
+                {
+                    Util.ReadFull(b, tb, 0, r);
+                    for (int i = 0; i < r; i++)
+                        if (ta[i] != tb[i]) return "The files differ after byte " + N + ", so these are not the same version of the file.";
+                }
+                bool changed = false;
+                for (int i = 0; i < n; i++)
+                {
+                    byte x = (byte)(ha[i] ^ hb[i]);
+                    if (x != 0) changed = true;
+                    if (known[i] && key[i] != x) return "This pair disagrees with the previous one at byte " + i + ": one of them is not an exact original.";
+                }
+                if (!changed) return "The two files are identical: the second one is not encrypted.";
+                for (int i = 0; i < n; i++) { key[i] = (byte)(ha[i] ^ hb[i]); known[i] = true; }
+                return null;
+            }
+        }
+
+        // Puts the key first, replacing an earlier key file.
+        public static void Use(byte[] key)
+        {
+            All.RemoveAll(k => k.Name == FileName);
+            All.Insert(0, new Key { Name = FileName, K = key });
         }
     }
 
@@ -851,6 +890,7 @@ namespace JassDecryptor
         readonly Button startBtn = new Button { Text = "Restore", Enabled = false };
         readonly Button stopBtn = new Button { Text = "Stop", Enabled = false };
         readonly Button reportBtn = new Button { Text = "Open report", Enabled = false };
+        readonly Button keyBtn = new Button { Text = "Key from pair…" };
         readonly CheckBox onlyProblems = new CheckBox { Text = "Problems only", AutoSize = true, Anchor = AnchorStyles.Left };
         readonly ListView list = new ListView { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill };
         readonly ProgressBar bar = new ProgressBar { Anchor = AnchorStyles.Left | AnchorStyles.Right };
@@ -882,7 +922,7 @@ namespace JassDecryptor
                 Text = "Choose, type or drop a folder or a file here. Each file is restored next to its .jass, which stays unchanged.",
                 AutoSize = true, Margin = new Padding(3, 3, 3, px(6))
             };
-            foreach (var b in new[] { folderBtn, fileBtn, startBtn, stopBtn, reportBtn })
+            foreach (var b in new[] { folderBtn, fileBtn, startBtn, stopBtn, reportBtn, keyBtn })
             {
                 b.AutoSize = true; b.MinimumSize = new Size(px(90), 0); b.Padding = new Padding(px(6), px(2), px(6), px(2));
             }
@@ -899,13 +939,13 @@ namespace JassDecryptor
             var mid = new Panel { Dock = DockStyle.Fill, Padding = new Padding(px(8)) };
             mid.Controls.Add(list);
 
-            var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 5, Padding = new Padding(px(8), 0, px(8), px(8)) };
+            var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 6, Padding = new Padding(px(8), 0, px(8), px(8)) };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, px(200)));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 3; i++) bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            for (int i = 0; i < 4; i++) bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             bar.Height = px(18);
             bottom.Controls.Add(bar, 0, 0); bottom.Controls.Add(status, 1, 0); bottom.Controls.Add(onlyProblems, 2, 0);
-            bottom.Controls.Add(stopBtn, 3, 0); bottom.Controls.Add(reportBtn, 4, 0);
+            bottom.Controls.Add(stopBtn, 3, 0); bottom.Controls.Add(reportBtn, 4, 0); bottom.Controls.Add(keyBtn, 5, 0);
 
             Controls.Add(mid); Controls.Add(bottom); Controls.Add(top);
 
@@ -928,6 +968,7 @@ namespace JassDecryptor
             pathBox.Leave += delegate { ApplyTyped(); };
             startBtn.Click += delegate { Start(); };
             stopBtn.Click += delegate { stop = true; stopBtn.Enabled = false; status.Text = "Stopping after the current file…"; };
+            keyBtn.Click += delegate { KeyFromPair(); };
             reportBtn.Click += delegate { if (reportPath != null) Process.Start("explorer.exe", "/select,\"" + reportPath + "\""); };
             onlyProblems.CheckedChanged += delegate { Refill(); };
             DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) && !stopBtn.Enabled ? DragDropEffects.Copy : DragDropEffects.None; };
@@ -1020,7 +1061,7 @@ namespace JassDecryptor
             results.Clear(); list.Items.Clear();
             bar.Maximum = files.Count; bar.Value = 0;
             running = true; pathBox.ReadOnly = true;
-            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = false; stopBtn.Enabled = true; reportBtn.Enabled = false;
+            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = keyBtn.Enabled = false; stopBtn.Enabled = true; reportBtn.Enabled = false;
             flush.Start();
             var work = new List<string>(files);
             var t = new Thread(() =>
@@ -1035,6 +1076,93 @@ namespace JassDecryptor
                 BeginInvoke((MethodInvoker)Finish);
             }) { IsBackground = true };
             t.Start();
+        }
+
+        void KeyFromPair()
+        {
+            float k;
+            using (var g = CreateGraphics()) k = g.DpiX / 96f;
+            Func<int, int> px = v => (int)(v * k);
+            var key = new byte[Keystream.N]; var known = new bool[Keystream.N];
+
+            var d = new Form
+            {
+                Text = "Key from a file pair", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, Font = Font, AutoScaleMode = AutoScaleMode.None,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(px(14))
+            };
+            var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 3 };
+            var info = new Label
+            {
+                Text = "For files none of the built-in keys fits. Pick a file you have both as the exact original and encrypted (.jass). " +
+                    "An original of 20000 bytes or more gives the whole key; smaller ones can be added one after another.",
+                AutoSize = true, MaximumSize = new Size(px(560), 0), Margin = new Padding(px(3), 0, px(3), px(10))
+            };
+            t.Controls.Add(info); t.SetColumnSpan(info, 3);
+            var origBox = new TextBox { Width = px(420) };
+            var encBox = new TextBox { Width = px(420) };
+            foreach (var row in new[] { Tuple.Create("Original:", origBox), Tuple.Create("Encrypted:", encBox) })
+            {
+                var box = row.Item2;
+                var browse = new Button { Text = "…", AutoSize = true, MinimumSize = new Size(px(32), 0) };
+                browse.Click += delegate
+                {
+                    Cursor.Current = Cursors.WaitCursor;
+                    using (var o = new OpenFileDialog { Filter = box == encBox ? ".jass files|*.jass*|All files|*.*" : "All files|*.*", InitialDirectory = StartFolder() ?? "" })
+                        if (o.ShowDialog(d) == DialogResult.OK)
+                        {
+                            box.Text = o.FileName;
+                            // The other half usually sits next to it.
+                            int layers;
+                            string other = box == origBox ? o.FileName + ".jass" : Path.Combine(Path.GetDirectoryName(o.FileName), Engine.BaseName(Path.GetFileName(o.FileName), out layers));
+                            var otherBox = box == origBox ? encBox : origBox;
+                            if (otherBox.Text.Length == 0 && File.Exists(other)) otherBox.Text = other;
+                        }
+                };
+                t.Controls.Add(new Label { Text = row.Item1, AutoSize = true, Anchor = AnchorStyles.Left });
+                t.Controls.Add(box); t.Controls.Add(browse);
+            }
+            var state = new Label { AutoSize = true, MaximumSize = new Size(px(560), 0), Margin = new Padding(px(3), px(10), px(3), px(10)) };
+            t.Controls.Add(state); t.SetColumnSpan(state, 3);
+            var add = new Button { Text = "Make key", AutoSize = true, MinimumSize = new Size(px(110), px(28)) };
+            var close = new Button { Text = "Close", AutoSize = true, MinimumSize = new Size(px(90), px(28)), DialogResult = DialogResult.Cancel };
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
+            buttons.Controls.Add(close); buttons.Controls.Add(add);
+            t.Controls.Add(buttons); t.SetColumnSpan(buttons, 3);
+            d.Controls.Add(t);
+            d.AcceptButton = add; d.CancelButton = close;
+
+            add.Click += delegate
+            {
+                string err;
+                try { err = Keystream.AddPair(origBox.Text.Trim(), encBox.Text.Trim(), key, known); }
+                catch (Exception ex) { err = ex.Message; }
+                if (err != null) { state.ForeColor = Color.Firebrick; state.Text = err; return; }
+                int have = Array.FindAll(known, x => x).Length;
+                if (have < Keystream.N)
+                {
+                    state.ForeColor = SystemColors.ControlText;
+                    state.Text = "Known: " + have + " of " + Keystream.N + " bytes. Add a pair with a larger original to complete the key.";
+                    origBox.Text = encBox.Text = "";
+                    return;
+                }
+                var same = Keystream.All.Find(x => Util.Hex(x.K) == Util.Hex(key));
+                if (same != null)
+                {
+                    MessageBox.Show(d, "This is the " + same.Name + " key; nothing to save.", d.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    d.Close(); return;
+                }
+                string path = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), Keystream.FileName);
+                if (File.Exists(path) && MessageBox.Show(d, Keystream.FileName + " already exists next to the exe. Replace it?", d.Text,
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                try { File.WriteAllBytes(path, key); }
+                catch (Exception ex) { state.ForeColor = Color.Firebrick; state.Text = "Cannot save " + path + ": " + ex.Message; return; }
+                Keystream.Use(key);
+                MessageBox.Show(d, "Key saved as " + path + ".\nIt is used from now on, together with the built-in ones.", d.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                d.Close();
+                if (root != null) SetRoot(root);
+            };
+            d.ShowDialog(this);
         }
 
         Conflict AskOnUiThread(Result r, string existing)
@@ -1144,7 +1272,7 @@ namespace JassDecryptor
             reportPath = Engine.WriteReport(results);
             reportBtn.Enabled = reportPath != null;
             running = false; pathBox.ReadOnly = false;
-            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = true; stopBtn.Enabled = false;
+            startBtn.Enabled = folderBtn.Enabled = fileBtn.Enabled = keyBtn.Enabled = true; stopBtn.Enabled = false;
             var cnt = new Dictionary<string, int>();
             int problems = 0;
             foreach (var r in results)
