@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (2026-10-18)
+
+- The key differs between infected machines. A second key is built in, and every file gets the key that fits it, so one folder may hold files from different machines.
+- The key check before writing passes when any built-in key fits.
+- Cyrillic names no longer turn into `?` when the command line output is redirected to a file.
+
 ## 1.1.2 (2026-10-18)
 
 - The exe shows its real version in Properties (it said 1.0.0.0); releases take it from the tag.

@@ -33,7 +33,7 @@ If this matches, try the tool before you pay anything.
 
 ## The "very strong password" isn't
 
-Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: SQL Server databases, archives, PDFs and spreadsheets all came back and pass their own checksums.
+Only the first 20000 bytes of each file are scrambled and the rest is left as it was. The key is the same for every file on a machine but differs between machines. The tool carries every key known so far, each proved byte for byte, and picks the one that fits each file: SQL Server databases, archives, PDFs and spreadsheets come back and pass their own checksums.
 
 ## How to use it
 
@@ -45,7 +45,7 @@ If a file with that name already exists:
 - **same content**: it is left alone;
 - **different**: you see both sizes and choose **keep both** (saved as `name (recovered)`), **replace** (the old one becomes `name (old)`, nothing is deleted) or **skip**.
 
-Before writing anything, the tool tests the key on a few of your files. If your files were encrypted with a different key, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe. For scripts and many machines there is a [command line](#command-line) mode.
+Before writing anything, the tool tests its keys on a few of your files. If none fits, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe. For scripts and many machines there is a [command line](#command-line) mode.
 
 ## After the recovery
 
@@ -61,7 +61,7 @@ You need one file that you have both as an exact original and encrypted: an inst
 python python/derive_keystream.py jass_keystream_20000.bin <original> <original>.jass
 ```
 
-Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; the status line then shows its name instead of "built-in". An older version of a file is not an original: wherever its content changed, the key comes out wrong.
+Put `jass_keystream_20000.bin` next to `JassDecryptor.exe`; it is tried along with the built-in keys. An older version of a file is not an original: wherever its content changed, the key comes out wrong.
 
 Stuck? Open an issue, with one non-sensitive original/encrypted pair if you can share it.
 
@@ -81,9 +81,18 @@ A small business woke up to `*.jass` files. What mattered most was its SQL Serve
 
 Lessons: an "original" must be the exact same version, so compare the bytes after the encrypted zone first. Prove a key on something with checksums, not on how the output looks.
 
+### Keys
+
+| Key | Source | Proof |
+|---|---|---|
+| `keystream/jass_keystream_20000.bin` | The machine in the story above. | ZIP CRC32, `7z t`, `DBCC CHECKDB`. |
+| `keystream/jass_keystream_20000_2.bin` | Another machine. Published first in [Xyntrax's JASS-Decryptor](https://github.com/Xyntrax/JASS-Decryptor), which credits a script by [Rivitna](https://x.com/rivitna2). Thanks to both. | Confirmed here on samples from that machine: an original/encrypted pair covers bytes 0 to 17259, a zlib stream with an Adler-32 checksum in an encrypted PDF covers 11046 to 19999. |
+
+Each file gets the key under which its head matches its extension (ZIP, PDF, Office and so on), is all zeros, or is plain text. Files that cannot tell get the key most other files fit.
+
 ### What the tool checks
 
-- **Before:** decrypts the head of sample files with known signatures (ZIP, PDF, PNG, XML, Office, SQL Server backups). Wrong key, no writes.
+- **Before:** decrypts the head of sample files with known signatures (ZIP, PDF, PNG, XML, Office, SQL Server backups) with every key. No key fits, no writes.
 - **After each file:** CRC32 of ZIP/Office/ODF entries inside the decrypted zone, PNG chunk CRCs, XML parsing, a `7z t` for RAR/7z when 7-Zip is installed (found via registry or PATH; optional), header checks for the rest.
 - Writes to a temporary file and renames it, so an interrupted run never leaves a half-written file under the real name. Memory use stays flat on large files.
 
@@ -107,12 +116,12 @@ start /wait JassDecryptor.exe /cli D:\Data /conflict:skip
 |---|---|
 | `csharp/` | The app: one C# file. `build.cmd` compiles it with the `csc.exe` that ships with Windows (.NET Framework 4), no Visual Studio needed. |
 | `python/` | `jass_decryptor.py` (same output as the app, byte for byte), `derive_keystream.py`, `selftest.py`. |
-| `keystream/jass_keystream_20000.bin` | The key. SHA-256 `ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d` |
+| `keystream/` | The keys, see [Keys](#keys). SHA-256 `ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d` and `c58faba9452f3323c58bf75af38651c7b029681c0385509fe0ac5ad423e9dde5`. |
 | `samples/zero-filled.config.jass` | A real encrypted file whose original was all zeros, so it holds the first 1241 bytes of the key and no data. |
 
 ### Indicators
 
-- Encryption: XOR of bytes 0 to 19999 with a fixed keystream; size unchanged; no marker or footer.
+- Encryption: XOR of bytes 0 to 19999 with a keystream that is fixed per machine; size unchanged; no marker or footer.
 - Sample believed to be the encryptor, from the antivirus quarantine of the hit machine (not run, not analysed yet):
   - `laweFc.exe`, 704512 bytes
   - SHA-256 `114def510f10ad21fd43534d635f518d0ed55ff0faf32e3297ba173d3ebb665d`

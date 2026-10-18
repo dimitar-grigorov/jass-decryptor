@@ -22,37 +22,49 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyProduct("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026 Dimitar Grigorov")]
-[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 namespace JassDecryptor
 {
+    class Key
+    {
+        public string Name; public byte[] K;
+    }
+
+    // One key per infected machine; each file gets the one that fits.
     static class Keystream
     {
         public const int N = 20000;
-        const string Sha256 = "ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d";
         public const string FileName = "jass_keystream_20000.bin";
-        public static string Origin = "built-in";
-        public static readonly byte[] K = Load();
-
-        static byte[] Load()
+        static readonly string[][] BuiltIn =
         {
-            // A keystream file next to the exe wins, so a victim with another key needs no rebuild.
+            new[] { "JassDecryptor.keystream", "ffff0997f3ac60f55261adda046f2b264c6d2619bacca767d1e4b3a1c3d1cb3d", "built-in 1" },
+            new[] { "JassDecryptor.keystream2", "c58faba9452f3323c58bf75af38651c7b029681c0385509fe0ac5ad423e9dde5", "built-in 2" },
+        };
+        public static readonly List<Key> All = Load();
+        // For files whose format cannot tell; set by Preflight.
+        public static Key Default = All[0];
+
+        static List<Key> Load()
+        {
+            var keys = new List<Key>();
+            // A key file next to the exe is tried first.
             string ext = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), FileName);
             if (File.Exists(ext))
             {
                 var e = File.ReadAllBytes(ext);
                 if (e.Length != N) throw new InvalidDataException(FileName + " must be exactly " + N + " bytes.");
-                Origin = FileName;
-                return e;
+                keys.Add(new Key { Name = FileName, K = e });
             }
-            using (var s = typeof(Keystream).Assembly.GetManifestResourceStream("JassDecryptor.keystream"))
-            {
-                var b = new byte[N];
-                int r = 0, n;
-                while (r < N && (n = s.Read(b, r, N - r)) > 0) r += n;
-                if (r != N || Util.Hex(SHA256.Create().ComputeHash(b)) != Sha256) throw new InvalidDataException("The built-in key is damaged.");
-                return b;
-            }
+            foreach (var b in BuiltIn)
+                using (var s = typeof(Keystream).Assembly.GetManifestResourceStream(b[0]))
+                {
+                    var k = new byte[N];
+                    if (s == null || Util.ReadFull(s, k, 0, N) != N || Util.Hex(SHA256.Create().ComputeHash(k)) != b[1])
+                        throw new InvalidDataException("The built-in key is damaged.");
+                    keys.Add(new Key { Name = b[2], K = k });
+                }
+            return keys;
         }
     }
 
@@ -115,19 +127,20 @@ namespace JassDecryptor
     class JassStream : Stream
     {
         readonly FileStream f;
-        readonly bool xor;
-        public JassStream(string path, bool xor)
+        readonly byte[] key;
+        // null key: plain copy (even number of .jass layers).
+        public JassStream(string path, byte[] key)
         {
             // FileShare.Read: a file open for writing elsewhere (e.g. a live .mdf) fails here and is reported as locked.
             f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
-            this.xor = xor;
+            this.key = key;
         }
         public override int Read(byte[] buffer, int offset, int count)
         {
             long pos = f.Position;
             int n = f.Read(buffer, offset, count);
-            if (xor)
-                for (int i = 0; i < n && pos + i < Keystream.N; i++) buffer[offset + i] ^= Keystream.K[pos + i];
+            if (key != null)
+                for (int i = 0; i < n && pos + i < Keystream.N; i++) buffer[offset + i] ^= key[pos + i];
             return n;
         }
         public override bool CanRead { get { return true; } }
@@ -466,11 +479,13 @@ namespace JassDecryptor
             return Util.ReadFull(s, h, 0, h.Length);
         }
 
-        // Checks that the stream fits this machine: files with a clear signature must decrypt to it.
+        // Sample files must match their signature with some key; the best key becomes the default.
         public static string Preflight(List<string> files, out int tested, out int passed)
         {
             tested = 0; passed = 0;
-            var h = new byte[16384];
+            var keys = Keystream.All;
+            var hits = new int[keys.Count];
+            var raw = new byte[16384]; var h = new byte[16384];
             var bad = new List<string>();
             int step = Math.Max(1, files.Count / 400);
             for (int i = 0; i < files.Count && tested < 40; i += step)
@@ -481,23 +496,75 @@ namespace JassDecryptor
                 if (exp == null || layers % 2 == 0) continue;
                 try
                 {
-                    using (var s = new JassStream(files[i], true))
+                    int n;
+                    using (var f = new FileStream(files[i], FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
-                        if (s.Length < 64) continue;
-                        int n = ReadHead(s, h);
-                        bool zero = true;
-                        for (int j = 0; j < n && zero; j++) if (h[j] != 0) zero = false;
-                        if (zero) continue;
-                        tested++;
-                        string k = Formats.Sniff(h, n);
-                        if (k == exp || (exp == "ole" && k == "zip")) passed++;
-                        else bad.Add(Path.GetFileName(files[i]));
+                        if (f.Length < 64) continue;
+                        n = Util.ReadFull(f, raw, 0, raw.Length);
                     }
+                    // An all-zero original says nothing about the format.
+                    if (keys.Exists(k => Decrypt(raw, n, k.K, h) && Array.TrueForAll(h, b => b == 0))) continue;
+                    tested++;
+                    bool any = false;
+                    for (int k = 0; k < keys.Count; k++)
+                        if (Fits(raw, n, keys[k].K, exp, h)) { hits[k]++; any = true; }
+                    if (any) passed++;
+                    else bad.Add(Path.GetFileName(files[i]));
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
+            int best = 0;
+            for (int k = 1; k < keys.Count; k++) if (hits[k] > hits[best]) best = k;
+            Keystream.Default = keys[best];
             return bad.Count == 0 ? "" : string.Join(", ", bad.GetRange(0, Math.Min(5, bad.Count)).ToArray());
+        }
+
+        static bool Decrypt(byte[] raw, int n, byte[] key, byte[] h)
+        {
+            Array.Clear(h, 0, h.Length);
+            for (int j = 0; j < n; j++) h[j] = j < Keystream.N ? (byte)(raw[j] ^ key[j]) : raw[j];
+            return true;
+        }
+
+        static bool Fits(byte[] raw, int n, byte[] key, string exp, byte[] h)
+        {
+            Decrypt(raw, n, key, h);
+            string k = Formats.Sniff(h, n);
+            return k == exp || (exp == "ole" && k == "zip");
+        }
+
+        // Best key by signature, then all zeros, then plain text; ties keep the default.
+        static Key PickKey(string path, string name)
+        {
+            if (Keystream.All.Count == 1) return Keystream.Default;
+            string exp = Formats.Expected(name);
+            var raw = new byte[16384]; var h = new byte[16384];
+            int n;
+            using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) n = Util.ReadFull(f, raw, 0, raw.Length);
+            Key best = Keystream.Default;
+            int top = Score(raw, n, best.K, exp, h);
+            foreach (var k in Keystream.All)
+            {
+                int sc = Score(raw, n, k.K, exp, h);
+                if (sc > top) { top = sc; best = k; }
+            }
+            return best;
+        }
+
+        static int Score(byte[] raw, int n, byte[] key, string exp, byte[] h)
+        {
+            if (n == 0) return 0;
+            if (exp != null && Fits(raw, n, key, exp, h)) return 3;
+            Decrypt(raw, n, key, h);
+            int m = Math.Min(n, Keystream.N), zero = 0, ctl = 0;
+            for (int j = 0; j < m; j++)
+            {
+                if (h[j] == 0) zero++;
+                else if (h[j] < 9 || (h[j] > 13 && h[j] < 32 && h[j] != 26)) ctl++;
+            }
+            if (zero == m) return 2;
+            return zero == 0 && ctl == 0 ? 1 : 0;
         }
 
         public delegate Conflict AskConflict(Result r, string existing);
@@ -515,8 +582,15 @@ namespace JassDecryptor
                 if (layers > 1) r.Note = layers + " times .jass; ";
                 string target = Path.Combine(fi.DirectoryName, bn);
                 r.Target = target;
+                byte[] key = null;
+                if (layers % 2 == 1)
+                {
+                    var k = PickKey(src, bn);
+                    key = k.K;
+                    if (k != Keystream.Default) r.Note += "key: " + k.Name + "; ";
+                }
                 Check c;
-                using (var s = new JassStream(src, layers % 2 == 1))
+                using (var s = new JassStream(src, key))
                 {
                     var h = new byte[(int)Math.Min(s.Length, 65536)];
                     int n = ReadHead(s, h);
@@ -914,7 +988,7 @@ namespace JassDecryptor
                     if (gen != scanGen) return;   // a newer path was chosen meanwhile
                     Cursor = Cursors.Default;
                     files = f;
-                    status.Text = f.Count + " .jass files, " + Util.Size(total) + "; key: " + Keystream.Origin + (errors.Count > 0 ? "; folders without access: " + errors.Count : "") +
+                    status.Text = f.Count + " .jass files, " + Util.Size(total) + (errors.Count > 0 ? "; folders without access: " + errors.Count : "") +
                         (f.Count > 0 ? ". Press Restore to start." : "");
                     startBtn.Enabled = f.Count > 0 && IsCurrent(pathBox.Text);
                     if (startBtn.Enabled && !pathBox.Focused) startBtn.Focus();
@@ -1121,6 +1195,8 @@ namespace JassDecryptor
             bool ownConsole = cli && !redirected && !AttachConsole(-1) && AllocConsole();
             if (cli)
             {
+                // Otherwise Cyrillic names become "?" in a redirected file.
+                if (redirected) Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
                 int code = CliMain(args);
                 if (ownConsole) { Console.Write("\nPress Enter to close."); Console.ReadLine(); }
                 return code;
@@ -1143,7 +1219,7 @@ namespace JassDecryptor
 
         static string KeystreamError()
         {
-            try { return Keystream.K.Length == Keystream.N ? null : "?"; }
+            try { return Keystream.All.Count > 0 ? null : "?"; }
             catch (TypeInitializationException ex) { return (ex.InnerException ?? ex).Message; }
         }
 
@@ -1177,7 +1253,7 @@ namespace JassDecryptor
             if (files.Count == 0) { Console.WriteLine("No .jass files in " + root); return 4; }
             int tested, passed;
             string bad = Engine.Preflight(files, out tested, out passed);
-            Console.WriteLine(files.Count + (files.Count == 1 ? " .jass file in " : " .jass files in ") + root + "; key: " + Keystream.Origin + "; key check: " + passed + " of " + tested);
+            Console.WriteLine(files.Count + (files.Count == 1 ? " .jass file in " : " .jass files in ") + root + "; key: " + Keystream.Default.Name + "; key check: " + passed + " of " + tested);
             if (tested >= 3 && passed < tested * 0.8 && !force)
             {
                 Console.WriteLine("The key does not fit (e.g. " + bad + "). Nothing was written.");

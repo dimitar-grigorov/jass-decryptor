@@ -1,10 +1,13 @@
 """Round-trip test without real victim files.
   python selftest.py make <dir>    writes <dir>/expected/* and their encrypted twins <dir>/jass/*.jass
   python selftest.py check <dir> <restored dir>    compares every restored file with expected, byte for byte
-The encrypted twins are made with the shipped keystream, so this tests the tools, not the key."""
+The encrypted twins are made with the shipped keystreams (a "k2 " copy with the second one), so this tests the tools
+and the choice of key per file, not the keys."""
 import io, os, random, sys, zipfile
 
-KS = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'keystream', 'jass_keystream_20000.bin'), 'rb').read()
+_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'keystream')
+KEYS = {'': open(os.path.join(_dir, 'jass_keystream_20000.bin'), 'rb').read(),
+        'k2 ': open(os.path.join(_dir, 'jass_keystream_20000_2.bin'), 'rb').read()}
 
 def files():
     rnd = random.Random(1)
@@ -14,7 +17,7 @@ def files():
         f.writestr('a.txt', text)
         f.writestr('b.bin', bytes(rnd.getrandbits(8) for _ in range(30000)))
     xml = b'<?xml version="1.0" encoding="utf-8"?>\n<root>' + b''.join(b'<i n="%d">value</i>' % i for i in range(2000)) + b'</root>'
-    return {
+    base = {
         'report.zip': z.getvalue(),
         'Book with spaces .xlsx': z.getvalue(),
         'a.b.c.notes.txt': text,
@@ -23,13 +26,15 @@ def files():
         'zero-filled.config': bytes(1241),
         'no-extension': text[:5000],
     }
+    return {p + n: d for p in KEYS for n, d in base.items()}
 
 def make(d):
     for sub in ('expected', 'jass'):
         os.makedirs(os.path.join(d, sub), exist_ok=True)
     for name, data in files().items():
         open(os.path.join(d, 'expected', name), 'wb').write(data)
-        enc = bytes(b ^ KS[i] if i < len(KS) else b for i, b in enumerate(data))
+        ks = KEYS['k2 ' if name.startswith('k2 ') else '']
+        enc = bytes(b ^ ks[i] if i < len(ks) else b for i, b in enumerate(data))
         open(os.path.join(d, 'jass', name + '.jass'), 'wb').write(enc)
 
 def check(d, restored):

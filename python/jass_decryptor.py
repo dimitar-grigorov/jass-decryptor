@@ -1,10 +1,10 @@
-"""Undo the .jass ransomware: every file has its first 20000 bytes XOR-ed with one fixed stream.
+"""Undo the .jass ransomware: every file has its first 20000 bytes XOR-ed with a fixed stream, one per infected machine.
 Usage: python jass_decryptor.py <file or folder> <output folder>
 Inputs are never modified. Writes <output>/jass-decryptor-report.csv with one verdict per file.
 
-Stream: jass_keystream_20000.bin next to this script if present, else ../keystream/. The shipped stream is proven exact
-for all 20000 positions for one victim: a ZIP decrypted with it passes its CRC32 and the database inside
-restores with a clean DBCC CHECKDB. Files larger than 20000 bytes were only encrypted in the head; the rest is untouched.
+Streams: jass_keystream_20000.bin next to this script if present, then the shipped ones in ../keystream/. Each file gets
+the stream under which its head looks right (signature, all zeros, plain text); otherwise the one most files fit.
+Files larger than 20000 bytes were only encrypted in the head; the rest is untouched.
 Verdicts: OK = format check passed, UNVERIFIED = decrypted but this format cannot be checked here, CHECK = a format
 check failed (the file may use another stream or was damaged): confirm these by hand. The C# tool (JassDecryptor.exe) is the
 one meant for end users; this script is the reference implementation and gives byte-identical output."""
@@ -12,14 +12,36 @@ import csv, io, os, re, struct, sys, zipfile, zlib
 import xml.etree.ElementTree as ET
 
 _here = os.path.dirname(os.path.abspath(__file__))
-_ks = os.path.join(_here, 'jass_keystream_20000.bin')
-KS = open(_ks if os.path.exists(_ks) else os.path.join(_here, '..', 'keystream', 'jass_keystream_20000.bin'), 'rb').read()
+_ks = [os.path.join(_here, 'jass_keystream_20000.bin')] + [os.path.join(_here, '..', 'keystream', n) for n in ('jass_keystream_20000.bin', 'jass_keystream_20000_2.bin')]
+KEYS = [open(p, 'rb').read() for p in _ks if os.path.exists(p)]
+N = 20000
 SUFFIX = re.compile(r'\.jass(\s.*)?$', re.I)
+SIGS = {'zip': (b'PK\x03\x04', b'PK\x05\x06'), 'png': (b'\x89PNG\r\n\x1a\n',), 'jpeg': (b'\xff\xd8\xff',), 'pdf': (b'%PDF',),
+        'gif': (b'GIF8',), 'rar': (b'Rar!\x1a\x07',), '7z': (b'7z\xbc\xaf\x27\x1c',), 'pe': (b'MZ',), 'sql-bak': (b'TAPE',),
+        'ole': (b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1', b'PK\x03\x04'), 'xml': (b'<', b'\xef\xbb\xbf', b'\xff\xfe', b'\xfe\xff')}
+EXT = {'zip': '.zip .docx .xlsx .pptx .docm .xlsm .odt .ods .odp .jar .apk .epub .vsdx', 'ole': '.doc .xls .ppt .msg .vsd .pub',
+       'xml': '.xml .config .xaml .resx .xsd .xsl .xslt .csproj .manifest .rdl .svg', 'png': '.png', 'jpeg': '.jpg .jpeg', 'pdf': '.pdf',
+       'gif': '.gif', 'rar': '.rar', '7z': '.7z', 'sql-bak': '.bak', 'pe': '.exe .dll'}
 
-def decrypt(raw):
+def expected(name):
+    e = os.path.splitext(name)[1].lower()
+    return next((k for k, v in EXT.items() if e in v.split()), None)
+
+def decrypt(raw, ks):
     d = bytearray(raw)
-    for i in range(min(len(d), len(KS))): d[i] ^= KS[i]
+    for i in range(min(len(d), len(ks))): d[i] ^= ks[i]
     return bytes(d)
+
+def score(raw, ks, exp):
+    """3 = the extension's signature, 2 = all zeros, 1 = plain text, 0 = nothing (same rule as the C# tool)."""
+    h = decrypt(raw[:16384], ks)
+    if exp and h.lstrip(b' \t\r\n' if exp == 'xml' else b'').startswith(SIGS[exp]): return 3
+    m = h[:N]
+    if m and not any(m): return 2
+    return 1 if m and all(b >= 32 or 9 <= b <= 13 or b == 26 for b in m) else 0
+
+def pick(raw, name, default):
+    return max(KEYS, key=lambda k: (score(raw, k, expected(name)), k is default))
 
 def png_ok(b):
     if not b.startswith(b'\x89PNG\r\n\x1a\n'): return False
@@ -100,8 +122,16 @@ def main(src, out):
             for f in fn:
                 if SUFFIX.search(f): jobs.append((os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), src)))
     rows, tally = [], {}
+    # Default: the stream most signed files fit.
+    hits = [0] * len(KEYS)
     for p, rel in jobs:
-        raw = open(p, 'rb').read(); dec = decrypt(raw)
+        exp = expected(SUFFIX.sub('', p))
+        if exp:
+            raw = open(p, 'rb').read(16384)
+            for i, k in enumerate(KEYS): hits[i] += score(raw, k, exp) == 3
+    default = KEYS[hits.index(max(hits))]
+    for p, rel in jobs:
+        raw = open(p, 'rb').read(); ks = pick(raw, SUFFIX.sub('', os.path.basename(p)), default); dec = decrypt(raw, ks)
         dst = os.path.join(out, SUFFIX.sub('', rel)); os.makedirs(os.path.dirname(dst) or '.', exist_ok=True)
         open(dst, 'wb').write(dec)
         kind, verdict, note = check(os.path.basename(dst), dec)
@@ -111,7 +141,7 @@ def main(src, out):
                 import subprocess
                 r = subprocess.run([seven, 't', dst], capture_output=True, text=True, timeout=1800)
                 verdict, note = ('OK', '7-Zip test: all CRC ok') if 'Everything is Ok' in r.stdout else ('CHECK', '7-Zip test failed')
-        rows.append([rel, len(raw), min(len(raw), len(KS)), kind, verdict, note]); tally[verdict] = tally.get(verdict, 0) + 1
+        rows.append([rel, len(raw), min(len(raw), N), kind, verdict, note]); tally[verdict] = tally.get(verdict, 0) + 1
     with open(os.path.join(out, 'jass-decryptor-report.csv'), 'w', newline='', encoding='utf-8-sig') as f:
         w = csv.writer(f); w.writerow(['file', 'size', 'decrypted_bytes', 'kind', 'verdict', 'note']); w.writerows(rows)
     print(len(jobs), 'files ->', out); print(tally)
