@@ -2,6 +2,12 @@
 
 **Files encrypted by the `.jass` ransomware? You can get them back for free.**
 
+<p align="center">
+  <img src="screenshots/showcase.png" width="600" alt="Jass Decryptor restoring a folder of .jass files">
+</p>
+
+Pick a folder, press **Restore**: every file comes back next to its `.jass`, checked, and the `.jass` files stay untouched. A whole business got its data back the same day. Nobody paid.
+
 ## ⬇ [Download JassDecryptor.exe](https://github.com/dimitar-grigorov/jass-decryptor/releases/latest/download/JassDecryptor.exe)
 
 One file, nothing to install, Windows 8 or later. The SHA-256 checksum and older versions are on the [releases page](https://github.com/dimitar-grigorov/jass-decryptor/releases/latest).
@@ -27,7 +33,7 @@ If this matches, try the tool before you pay anything.
 
 ## The "very strong password" isn't
 
-Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: SQL Server databases, archives, PDFs and spreadsheets all came back and pass their own checksums. A whole business was back the same day. Nobody paid.
+Only the first 20000 bytes of each file are scrambled, every file with the same key, and the rest is left as it was. We recovered that key and proved it byte for byte: SQL Server databases, archives, PDFs and spreadsheets all came back and pass their own checksums.
 
 ## How to use it
 
