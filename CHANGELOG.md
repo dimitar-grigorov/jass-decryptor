@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 (2026-10-18)
+
+- The folder button opens the modern Windows folder picker.
+- The path can be typed or pasted; Enter looks for `.jass` files there, a path that does not exist is shown in red.
+- Restore is bold and gets the focus once files are found, so Enter starts it.
+- A wait cursor while a dialog opens and while the key is checked.
+- Releases carry a build attestation: `gh attestation verify JassDecryptor.exe -R dimitar-grigorov/jass-decryptor`.
+
 ## 1.1.0 (2026-10-17)
 
 - Command line mode, polished: `/?` prints help, one line per file, a summary at the end, Ctrl+C stops after the current file.
