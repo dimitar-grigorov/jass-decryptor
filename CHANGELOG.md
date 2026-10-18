@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2 (2026-10-18)
+
+- The exe shows its real version in Properties (it said 1.0.0.0); releases take it from the tag.
+
 ## 1.1.1 (2026-10-18)
 
 - The folder button opens the modern Windows folder picker.

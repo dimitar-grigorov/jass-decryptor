@@ -22,7 +22,7 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyProduct("Jass Decryptor")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright © 2026 Dimitar Grigorov")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
 
 namespace JassDecryptor
 {

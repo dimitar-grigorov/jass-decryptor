@@ -21,6 +21,14 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Version from the tag, even if not bumped in the code
+      - name: Version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $f = 'csharp/JassDecryptor.cs'
+          (Get-Content $f -Raw) -replace 'AssemblyVersion\("[^"]*"\)', "AssemblyVersion(`"$($env:GITHUB_REF_NAME.TrimStart('v')).0`")" | Set-Content $f -NoNewline
+
       - name: Build
         shell: cmd
         run: csharp\build.cmd
