@@ -45,6 +45,8 @@ If a file with that name already exists:
 - **same content**: it is left alone;
 - **different**: you see both sizes and choose **keep both** (saved as `name (recovered)`), **replace** (the old one becomes `name (old)`, nothing is deleted) or **skip**.
 
+**Nothing is ever deleted or overwritten.** The `.jass` files are only read, an existing file is renamed only after you choose **replace**, and if no key fits, nothing is written at all. A wrong result can always be tried again.
+
 Before writing anything, the tool tests its keys on a few of your files. If none fits, it stops and writes nothing; see [Different key?](#different-key) below. A CSV report of every file goes to `JassDecryptor-reports` next to the exe. For scripts and many machines there is a [command line](#command-line) mode.
 
 ## After the recovery
